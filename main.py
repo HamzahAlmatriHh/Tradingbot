@@ -187,8 +187,27 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
         sentiment_label = sentiment.get('label', 'neutral') if sentiment else 'neutral'
         notifier.send_trade_alert(symbol, final_decision, amount, actual_entry, sl, tp, sentiment_label)
         
-        logger.info("جاري وضع أوامر Stop Loss و Take Profit لحماية رأس المال...")
-        sl_tp_success = client.place_sl_tp(symbol, final_decision, amount, sl, tp)
+        logger.info("جاري وضع أوامر الحماية...")
+
+        partial_enabled = getattr(Config, "PARTIAL_TP_ENABLED", True)
+
+        protection_meta = {}
+
+        if partial_enabled:
+            protection = client.place_partial_protection(
+                symbol=symbol,
+                side=final_decision,
+                amount=amount,
+                sl_price=sl,
+                tp1_price=tp,
+                partial_pct=getattr(Config, "PARTIAL_TP_PCT", 0.5)
+            )
+
+            sl_tp_success = protection.get("success", False)
+            protection_meta = protection
+
+        else:
+            sl_tp_success = client.place_sl_tp(symbol, final_decision, amount, sl, tp)
         
         if not sl_tp_success:
             logger.critical(f"⚠️ فشل وضع أوامر الحماية للزوج {symbol}! جاري إغلاق الصفقة...")
@@ -216,14 +235,30 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
                 "spread": float((ticker.get('ask', 0) - ticker.get('bid', 0)) / ticker.get('bid', 1)) if ticker and ticker.get('bid', 0) > 0 else 0.0,
                 "volume_24h": float(ticker.get('quoteVolume', 0.0)) if ticker else 0.0,
                 "risk_pct": float(trade_risk_pct * 100),
-                "leverage": int(trade_leverage)
+                "leverage": int(trade_leverage),
+                "partial_tp_enabled": bool(partial_enabled),
+                "partial_tp_done": False,
+                "tp1": float(tp),
+                "tp1_order_id": protection_meta.get("tp1_order_id"),
+                "tp1_client_id": protection_meta.get("tp1_client_id"),
+                "partial_amount": float(protection_meta.get("partial_amount", amount * getattr(Config, "PARTIAL_TP_PCT", 0.5))),
+                "runner_amount": float(protection_meta.get("runner_amount", amount * (1 - getattr(Config, "PARTIAL_TP_PCT", 0.5)))),
+                "original_amount": float(amount),
+                "current_sl": float(sl)
             }
             state_manager.save_entry_metadata(symbol, entry_meta)
             logger.info(f"تم حفظ بيانات دخول صفقة {symbol} بنجاح.")
         except Exception as e:
             logger.error(f"خطأ أثناء حفظ بيانات دخول الصفقة: {e}")
         
-        trailing_manager.register_trade(symbol, final_decision, actual_entry, sl)
+        trailing_manager.register_trade(
+            symbol=symbol,
+            side=final_decision,
+            entry_price=actual_entry,
+            initial_sl=sl,
+            amount=amount,
+            partial_tp_enabled=partial_enabled,
+        )
     
         emoji = '🟢 BUY' if final_decision == 'buy' else '🔴 SELL'
         coin_data['decision'] = emoji
@@ -251,17 +286,24 @@ def handle_trade_close(alert, state_manager):
         slippage_exit = abs(actual_exit - target_exit) / target_exit
         
     pnl_val = float(alert.get('pnl', 0.0))
+    partial_realized = float(entry_meta.get("partial_realized_pnl", 0.0) or 0.0)
+    pnl_val = pnl_val + partial_realized
+    
     entry_price = float(entry_meta.get('entry_price', 0.0))
     amount = float(entry_meta.get('amount', 0.0))
     entry_notional = entry_price * amount
     pnl_pct = (pnl_val / entry_notional * 100) if entry_notional > 0 else 0.0
     
+    exit_reason = alert['type']
+    if partial_realized != 0:
+        exit_reason = f"{alert['type']} + PARTIAL_TP1"
+        
     exit_details = {
         "exit_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "exit_price": actual_exit,
         "pnl": pnl_val,
         "pnl_pct": pnl_pct,
-        "exit_reason": alert['type'],
+        "exit_reason": exit_reason,
         "slippage": slippage_exit
     }
     
@@ -487,6 +529,29 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
         for sym in check_symbols:
             alerts = client.get_recent_sl_tp_fills(sym, last_scan_time)
             for alert in alerts:
+                sym_clean = alert["symbol"].split(":")[0]
+                meta = state_manager.state.get("entry_metadata", {}).get(sym_clean, {})
+
+                # إذا الصفقة Partial TP وما زال المركز مفتوحاً، لا تعتبر هذا إغلاقاً كاملاً.
+                if meta.get("partial_tp_enabled") and not meta.get("partial_tp_done"):
+                    current_amt = client.get_position_amount(sym_clean)
+
+                    if current_amt > 0:
+                        logger.info(
+                            f"🎯 [Partial TP Detected] تم رصد ربح جزئي لـ {sym_clean}، "
+                            f"لكن الصفقة ما زالت مفتوحة. سيتم تركها لـ manage_partial_tp_runner."
+                        )
+
+                        # نخزن الربح الجزئي داخل الميتاداتا حتى لا يضيع من المحفظة الوهمية لاحقاً.
+                        partial_pnl = float(alert.get("pnl", 0.0))
+                        meta["partial_realized_pnl"] = float(meta.get("partial_realized_pnl", 0.0)) + partial_pnl
+                        meta["partial_tp_alert_seen"] = True
+
+                        state_manager.state["entry_metadata"][sym_clean] = meta
+                        state_manager.save_state()
+
+                        continue
+
                 pnl_pct = 0.0
                 try:
                     exit_details = handle_trade_close(alert, state_manager)
@@ -934,6 +999,26 @@ def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, ri
                 upper_wick = closed_candle['high'] - max(closed_candle['open'], closed_candle['close'])
                 
                 ob_mid = v_order.get('ob_mid', optimal_entry)
+
+                # ------------------------------------------------------------
+                # فلتر Liquidity Sweep لحظة التأكيد النهائي
+                # ------------------------------------------------------------
+                recent_low = bars_df["low"].iloc[-14:-2].min()
+                recent_high = bars_df["high"].iloc[-14:-2].max()
+
+                swept_liquidity = False
+
+                if side == "buy":
+                    swept_liquidity = (
+                        closed_candle["low"] < recent_low and
+                        closed_candle["close"] > recent_low
+                    )
+
+                elif side == "sell":
+                    swept_liquidity = (
+                        closed_candle["high"] > recent_high and
+                        closed_candle["close"] < recent_high
+                    )
                 
                 # فلتر 1: إغلاق الشمعة في الاتجاه الصحيح مع ذيل ارتدادي قوي (Wick Rejection)
                 is_closed_correctly = False
@@ -953,7 +1038,7 @@ def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, ri
                 # فلتر 2: سيولة قوية تدل على تدخل المال الذكي (اختراق المتوسط بـ 20%)
                 is_volume_confirmed = current_volume > (avg_volume * 1.2)
                 
-                if is_closed_correctly and is_volume_confirmed:
+                if is_closed_correctly and is_volume_confirmed and swept_liquidity:
                     logger.info(f"✅ [Sniper CONFIRMED] تم تأكيد الدخول للزوج {symbol} (شمعة مغلقة ارتدادية + فوليوم عالي). التنفيذ فوراً...")
                     notifier.send_message(f"✅ <b>إشارة دخول مؤكدة (Confirmed Signal):</b>\nالزوج <code>{symbol}</code> أثبت ارتداده من الـ Order Block بحجم تداول عالي.\nجاري التنفيذ...")
                     
@@ -992,10 +1077,121 @@ def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, ri
                     )
                     state_manager.remove_virtual_order(symbol)
                 else:
-                    logger.info(f"⏳ [Sniper WAITING] السعر داخل المنطقة لكن لم تتوفر شروط الإغلاق والحجم للزوج {symbol}. نتجنب الفخ (Fakeout).")
+                    logger.info(
+                        f"⏳ [Sniper WAIT] {symbol}: لم يكتمل التأكيد. "
+                        f"closed={is_closed_correctly}, volume={is_volume_confirmed}, sweep={swept_liquidity}"
+                    )
                     
             except Exception as e:
                 logger.error(f"❌ فشل تحويل الأمر المعلق إلى صفقة حقيقية للزوج {symbol}: {e}")
+
+def manage_partial_tp_runner(client, state_manager, trailing_manager, notifier):
+    """
+    يفحص الصفقات المفتوحة:
+    إذا تم تنفيذ TP1 جزئياً، ينقل SL للباقي إلى Breakeven ويترك Runner للتريلينغ.
+    """
+    state = state_manager.get_state()
+    entry_metadata = state.get("entry_metadata", {}) or {}
+
+    for symbol, meta in list(entry_metadata.items()):
+        try:
+            if not meta.get("partial_tp_enabled"):
+                continue
+
+            if meta.get("partial_tp_done"):
+                continue
+
+            side = str(meta.get("side", "BUY")).lower()
+            if side in ["long"]:
+                side = "buy"
+            elif side in ["short"]:
+                side = "sell"
+
+            original_amount = float(meta.get("original_amount") or meta.get("amount") or 0.0)
+            if original_amount <= 0:
+                continue
+
+            partial_pct = getattr(Config, "PARTIAL_TP_PCT", 0.5)
+            expected_runner = original_amount * (1 - partial_pct)
+
+            current_amount = client.get_position_amount(symbol)
+
+            # إذا نقصت الكمية إلى حدود كمية الـ Runner، نفترض أن TP1 تحقق
+            # tolerance بسيط بسبب الدقة والـ rounding
+            tolerance = original_amount * 0.03
+
+            tp1_hit = (
+                current_amount > 0 and
+                current_amount <= expected_runner + tolerance
+            )
+
+            if not tp1_hit:
+                continue
+
+            entry_price = float(meta.get("entry_price", 0.0))
+            if entry_price <= 0:
+                continue
+
+            if side == "buy":
+                be_sl = entry_price * (1 + getattr(Config, "BREAKEVEN_BUFFER_PCT", 0.001))
+            else:
+                be_sl = entry_price * (1 - getattr(Config, "BREAKEVEN_BUFFER_PCT", 0.001))
+
+            be_sl = round(be_sl, 5)
+
+            logger.info(f"🎯 [Partial TP] تحقق TP1 لـ {symbol}. نقل الستوب إلى BE={be_sl}")
+
+            old_sl = float(meta.get("current_sl") or meta.get("sl") or 0)
+
+            client.cancel_sl_orders(symbol)
+            ok = client.place_sl_only(symbol, side, current_amount, be_sl)
+
+            if not ok:
+                logger.critical(
+                    f"🚨 فشل نقل SL إلى Breakeven بعد TP1 لـ {symbol}. محاولة إرجاع الستوب القديم..."
+                )
+
+                restored = False
+                if old_sl > 0:
+                    restored = client.place_sl_only(symbol, side, current_amount, old_sl)
+
+                if not restored:
+                    notifier.send_message(
+                        f"🚨 <b>فشل حرج بعد TP1</b>\n"
+                        f"الزوج: <code>{symbol}</code>\n"
+                        f"فشل نقل SL إلى Breakeven وفشل إرجاع الستوب القديم.\n"
+                        f"راجع الصفقة فوراً أو أغلقها يدوياً."
+                    )
+                else:
+                    notifier.send_message(
+                        f"⚠️ <b>فشل نقل SL إلى Breakeven</b>\n"
+                        f"الزوج: <code>{symbol}</code>\n"
+                        f"تم إرجاع الستوب القديم مؤقتاً عند: <code>{old_sl}</code>."
+                    )
+
+                continue
+
+            # تحديث metadata
+            meta["partial_tp_done"] = True
+            meta["runner_amount"] = float(current_amount)
+            meta["current_sl"] = float(be_sl)
+            entry_metadata[symbol] = meta
+
+            state["entry_metadata"] = entry_metadata
+            state_manager.set("entry_metadata", entry_metadata)
+
+            trailing_manager.mark_partial_tp_done(symbol, be_sl, current_amount)
+
+            notifier.send_message(
+                f"🎯 <b>TP1 تحقق بنجاح</b>\n"
+                f"الزوج: <code>{symbol}</code>\n"
+                f"تم إغلاق <code>{partial_pct*100:.0f}%</code> من الصفقة.\n"
+                f"تم نقل SL للباقي إلى Breakeven: <code>{be_sl}</code>\n"
+                f"الباقي يعمل الآن كـ Runner مع Trailing Stop."
+            )
+
+        except Exception as e:
+            logger.error(f"خطأ في manage_partial_tp_runner للزوج {symbol}: {e}")
 
 def monitor_active_trades(client, state_manager, trailing_manager, alert_manager, notifier, last_check_time):
     """
@@ -1043,35 +1239,42 @@ def monitor_active_trades(client, state_manager, trailing_manager, alert_manager
                         if atr > 0:
                             alert_manager.check_alerts(sym, trade_info, current_price, atr)
 
-                    # ب) التنفيذ بالقوة (Virtual TP/SL)
+                    # ب) التنفيذ بالقوة (Virtual SL فقط عند تفعيل Partial TP)
                     meta = state_manager.state.get("entry_metadata", {}).get(sym)
                     if meta:
                         side = meta.get("side", "").upper()
-                        # نستخدم الستوب الحالي (سواء الأساسي أو المتحرك)
-                        current_sl = trailing_manager.get_current_sl(sym) or meta.get("sl")
+                        current_sl = trailing_manager.get_current_sl(sym) or meta.get("current_sl") or meta.get("sl")
                         tp = meta.get("tp")
-                        amt = meta.get("amount", live_amts[sym])
-                        
+                        amt = live_amts.get(sym, meta.get("amount", 0))
+
+                        partial_enabled = bool(meta.get("partial_tp_enabled", False))
+                        partial_done = bool(meta.get("partial_tp_done", False))
+
                         force_close_reason = None
-                        if side in ["BUY", "LONG"] and current_sl and tp:
-                            if current_price >= tp:
-                                force_close_reason = "الهدف (TP)"
-                            elif current_price <= current_sl:
+
+                        if side in ["BUY", "LONG"]:
+                            # مع Partial TP لا نغلق ماركت عند TP، نترك أمر TP1 في Binance ينفذ جزئيًا.
+                            if current_sl and current_price <= current_sl:
                                 force_close_reason = "وقف الخسارة (SL)"
-                                
-                        elif side in ["SELL", "SHORT"] and current_sl and tp:
-                            if current_price <= tp:
+
+                            if (not partial_enabled) and tp and current_price >= tp:
                                 force_close_reason = "الهدف (TP)"
-                            elif current_price >= current_sl:
+
+                        elif side in ["SELL", "SHORT"]:
+                            if current_sl and current_price >= current_sl:
                                 force_close_reason = "وقف الخسارة (SL)"
-                                
+
+                            if (not partial_enabled) and tp and current_price <= tp:
+                                force_close_reason = "الهدف (TP)"
+
                         if force_close_reason:
-                            logger.critical(f"🚀 [Active Execution] السعر اللحظي ({current_price}) لمس {force_close_reason} لصفقة {sym}! جاري الإغلاق الفوري بالقوة...")
-                            # إغلاق الصفقة بسعر السوق فوراً
+                            logger.critical(
+                                f"🚀 [Active Execution] السعر اللحظي ({current_price}) لمس {force_close_reason} "
+                                f"لصفقة {sym}! جاري الإغلاق الفوري بالقوة..."
+                            )
                             success = client.close_position(sym, side.lower(), amt)
                             if success:
-                                live_amts[sym] = 0 # نجعله صفر لكي يقوم الكود بالأسفل بمعالجته كصفقة مغلقة ويرسل الإشعار فوراً!
-                                # ننتظر ثانية واحدة للسماح لباينانس بتسجيل الطلب في سجل الإغلاقات
+                                live_amts[sym] = 0
                                 time.sleep(1.5)
 
             # 3. التحقق مما إذا كانت الصفقة قد أغلقت (سواء من باينانس أو بتدخلنا القسري أعلاه)
@@ -1224,20 +1427,53 @@ def main():
         except Exception as e:
             logger.error(f"❌ حدث خطأ غير متوقع أثناء دورة المسح: {e}")
             
-        logger.info("⏳ تم انتهاء الدورة. البوت الآن في وضع مراقبة الصفقات المفتوحة (15 دقيقة)...")
+        scan_interval = int(
+            state_manager.get(
+                "scan_interval_seconds",
+                getattr(Config, "SCAN_INTERVAL_SECONDS", 600)
+            )
+        )
+
+        scan_interval = max(
+            getattr(Config, "MIN_SCAN_INTERVAL_SECONDS", 300),
+            min(scan_interval, getattr(Config, "MAX_SCAN_INTERVAL_SECONDS", 3600))
+        )
+
+        monitor_tick = getattr(Config, "MONITOR_TICK_SECONDS", 10)
+
+        logger.info(
+            f"⏳ انتهت جولة المسح. مراقبة مستمرة لمدة {scan_interval} ثانية "
+            f"قبل الجولة التالية..."
+        )
+
+        end_time = time.time() + scan_interval
         
         # وقت آخر فحص للصفقات المفتوحة (دقيق لتجنب فجوات الوقت)
         monitor_last_time = int(time.time() * 1000)
-        
-        # استراحة مقسمة لمراقبة الصفقات المفتوحة والأوامر المعلقة (90 حلقة × 10 ثانية = 900 ثانية)
-        for _ in range(90):
+
+        while time.time() < end_time:
+            if state_manager.get("force_scan_now", False):
+                logger.info("⚡ تم طلب مسح فوري من تيليجرام. الخروج من وضع المراقبة.")
+                state_manager.set("force_scan_now", False)
+                break
+                
             try:
                 check_network_connection(client)
                 monitor_virtual_orders(client, state_manager, notifier, trailing_manager, risk_manager)
-                monitor_last_time = monitor_active_trades(client, state_manager, trailing_manager, alert_manager, notifier, monitor_last_time)
+                manage_partial_tp_runner(client, state_manager, trailing_manager, notifier)
+                monitor_last_time = monitor_active_trades(
+                    client,
+                    state_manager,
+                    trailing_manager,
+                    alert_manager,
+                    notifier,
+                    monitor_last_time
+                )
+                maybe_send_periodic_reports(notifier, state_manager)
             except Exception as e:
-                pass
-            time.sleep(10)
+                logger.error(f"خطأ أثناء وضع المراقبة بين جولات المسح: {e}")
+
+            time.sleep(monitor_tick)
 
 if __name__ == "__main__":
     main()

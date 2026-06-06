@@ -33,19 +33,61 @@ class TrailingStopManager:
                 self._trades = saved
                 logger.info(f"[Trailing] تم استعادة حالة {len(saved)} صفقة متتبعة.")
 
-    def register_trade(self, symbol: str, side: str, entry_price: float, initial_sl: float):
+    def register_trade(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        initial_sl: float,
+        amount: float = 0.0,
+        partial_tp_enabled: bool = False,
+    ):
         """تسجيل صفقة جديدة في نظام التتبع"""
         self._trades[symbol] = {
-            'side': side.lower(),
-            'entry': float(entry_price),
-            'best_price': float(entry_price),
-            'current_sl': float(initial_sl),
-            'initial_sl': float(initial_sl),
-            'trailing_active': False,
+            "side": side.lower(),
+            "entry": float(entry_price),
+            "best_price": float(entry_price),
+            "current_sl": float(initial_sl),
+            "initial_sl": float(initial_sl),
+            "amount": float(amount or 0.0),
+            "runner_amount": float(amount or 0.0),
+            "partial_tp_enabled": bool(partial_tp_enabled),
+            "partial_tp_done": False,
+            "trailing_active": False,
         }
+
         if self._state_manager:
             self._state_manager.save_trailing_trades(self._trades)
-        logger.info(f"[Trailing] ✅ تم تسجيل صفقة {symbol} ({side.upper()}) | دخول: {entry_price} | SL أولي: {initial_sl}")
+
+        logger.info(
+            f"[Trailing] ✅ تم تسجيل صفقة {symbol} ({side.upper()}) | "
+            f"دخول: {entry_price} | SL أولي: {initial_sl} | amount={amount}"
+        )
+
+    def mark_partial_tp_done(self, symbol: str, new_sl: float, runner_amount: float):
+        """
+        تحديث حالة الصفقة بعد تحقق TP1:
+        - نعتبر أن جزءًا من الصفقة أُغلق.
+        - نحدث الستوب إلى Breakeven.
+        - نترك الباقي Runner.
+        """
+        if symbol not in self._trades:
+            return
+
+        trade = self._trades[symbol]
+        trade["partial_tp_done"] = True
+        trade["runner_amount"] = float(runner_amount or 0.0)
+        trade["current_sl"] = float(new_sl)
+        trade["initial_sl"] = float(new_sl)  # حتى لا يبقى R القديم يضغط الحساب بعد TP1
+        trade["trailing_active"] = True
+
+        if self._state_manager:
+            self._state_manager.save_trailing_trades(self._trades)
+
+        logger.info(
+            f"[Trailing] ✅ تم تفعيل Runner لـ {symbol}. "
+            f"SL moved to BE={new_sl}, runner_amount={runner_amount}"
+        )
 
     def unregister_trade(self, symbol: str):
         """إلغاء تتبع الصفقة بعد إغلاقها"""

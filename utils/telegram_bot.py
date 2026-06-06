@@ -91,6 +91,10 @@ class TelegramNotifier:
                     {"text": "📋 التقارير والأداء", "callback_data": "gui_reports_menu"},
                 ],
                 [
+                    {"text": "⏱️ فترة المسح", "callback_data": "gui_scan_interval"},
+                    {"text": "⚡ مسح الآن", "callback_data": "force_scan_now"},
+                ],
+                [
                     {"text": "🩺 صحة النظام", "callback_data": "gui_health"},
                     {"text": "⚙️ الحد الأقصى للصفقات", "callback_data": "gui_setmax"},
                 ],
@@ -170,6 +174,26 @@ class TelegramNotifier:
                 ],
                 [
                     {"text": "🏠 الرئيسية", "callback_data": "gui_home"},
+                ],
+            ]
+        }
+
+    def scan_interval_keyboard(self):
+        """قائمة إعداد فترة المسح"""
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "5 دقائق", "callback_data": "setscan_300"},
+                    {"text": "10 دقائق", "callback_data": "setscan_600"},
+                    {"text": "15 دقيقة", "callback_data": "setscan_900"},
+                ],
+                [
+                    {"text": "30 دقيقة", "callback_data": "setscan_1800"},
+                    {"text": "ساعة", "callback_data": "setscan_3600"},
+                ],
+                [
+                    {"text": "✍️ إدخال مخصص", "callback_data": "gui_setscan_manual"},
+                    {"text": "🏠 الرجوع", "callback_data": "gui_home"},
                 ],
             ]
         }
@@ -679,6 +703,26 @@ class TelegramNotifier:
                 )
             return
 
+        if pending == "awaiting_setscan":
+            self.user_state.pop(user_key, None)
+            if text.isdigit():
+                minutes = int(text)
+                minutes = max(5, min(minutes, 60))
+                new_sec = minutes * 60
+
+                state_manager.set("scan_interval_seconds", new_sec)
+                self.send_message(
+                    f"✅ تم تغيير فترة المسح إلى: <b>{minutes}</b> دقيقة.",
+                    reply_markup=self.main_menu_keyboard(),
+                )
+                logger.info(f"تم تغيير فترة المسح إلى {new_sec} ثانية عبر تيليجرام.")
+            else:
+                self.send_message(
+                    "⚠️ إدخال غير صحيح. الرجاء إدخال رقم بالدقائق.",
+                    reply_markup=self.main_menu_keyboard(),
+                )
+            return
+
         if pending == "awaiting_analyze":
             sym = self.normalize_symbol(text)
             self.user_state.pop(user_key, None)
@@ -884,6 +928,45 @@ class TelegramNotifier:
                     self.main_menu_keyboard(),
                 )
                 logger.info(f"تم تغيير الحد الأقصى للصفقات المفتوحة إلى {new_max} عبر GUI تيليجرام.")
+
+            elif data == "gui_scan_interval":
+                current_sec = int(state_manager.get("scan_interval_seconds", 600))
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    f"⏱️ <b>فترة المسح الحالية:</b> {current_sec // 60} دقيقة\n\nاختر فترة المسح الجديدة:",
+                    self.scan_interval_keyboard()
+                )
+
+            elif data == "gui_setscan_manual":
+                self.user_state[str(chat_id)] = "awaiting_setscan"
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    "🔢 <b>أرسل فترة المسح بالدقائق فقط:</b>\nمثال: <code>20</code>",
+                    self.main_menu_keyboard()
+                )
+
+            elif data.startswith("setscan_"):
+                new_interval_sec = int(data.replace("setscan_", "", 1))
+                state_manager.set("scan_interval_seconds", new_interval_sec)
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    f"✅ تم تعيين فترة المسح بنجاح إلى {new_interval_sec // 60} دقيقة.",
+                    self.main_menu_keyboard()
+                )
+                logger.info(f"تم تغيير فترة المسح إلى {new_interval_sec} ثانية من تيليجرام.")
+
+            elif data == "force_scan_now":
+                state_manager.set("force_scan_now", True)
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    "⚡ تم إرسال أمر المسح الفوري بنجاح! سيبدأ البوت بالبحث عن فرص فوراً.",
+                    self.main_menu_keyboard()
+                )
+                logger.info("تم تفعيل المسح الفوري من تيليجرام.")
 
             elif data == "gui_restart_confirm":
                 self.edit_message(

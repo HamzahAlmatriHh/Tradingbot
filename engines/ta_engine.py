@@ -40,6 +40,47 @@ class TAEngine:
             df['prior_swing_high'] = df['high'].shift(1).rolling(lookback).max()
             df['prior_swing_low'] = df['low'].shift(1).rolling(lookback).min()
             
+            # ------------------------------------------------------------
+            # Liquidity Sweep Detection
+            # ------------------------------------------------------------
+            liq_lookback = getattr(Config, "LIQUIDITY_SWEEP_LOOKBACK", 10)
+            sweep_recent_bars = getattr(Config, "LIQUIDITY_SWEEP_RECENT_BARS", 8)
+
+            # قاع/قمة سابقة قبل الشمعة الحالية
+            df["liq_prior_low"] = df["low"].shift(1).rolling(liq_lookback).min()
+            df["liq_prior_high"] = df["high"].shift(1).rolling(liq_lookback).max()
+
+            # Sweep للسيولة السفلية: كسر قاع سابق ثم إغلاق فوقه
+            df["sell_side_sweep"] = (
+                (df["low"] < df["liq_prior_low"]) &
+                (df["close"] > df["liq_prior_low"])
+            )
+
+            # Sweep للسيولة العلوية: كسر قمة سابقة ثم إغلاق تحتها
+            df["buy_side_sweep"] = (
+                (df["high"] > df["liq_prior_high"]) &
+                (df["close"] < df["liq_prior_high"])
+            )
+
+            # نطلب أن يكون السويب قريبًا من شمعة الـ displacement وليس قديمًا جدًا
+            df["recent_sell_side_sweep"] = (
+                df["sell_side_sweep"]
+                .shift(1)
+                .rolling(sweep_recent_bars)
+                .max()
+                .fillna(0)
+                .astype(bool)
+            )
+
+            df["recent_buy_side_sweep"] = (
+                df["buy_side_sweep"]
+                .shift(1)
+                .rolling(sweep_recent_bars)
+                .max()
+                .fillna(0)
+                .astype(bool)
+            )
+
             # 3. شروط الزخم والاندفاع (Displacement)
             df['strong_body'] = df['body'] > df['body_avg_20'] * 1.5
             df['close_near_high'] = ((df['close'] - df['low']) / df['range']) > 0.7
@@ -54,11 +95,30 @@ class TAEngine:
             bearish_bos = df['close'] < df['prior_swing_low']
             
             # 6. كتل الأوامر (Order Blocks)
-            # Bullish OB: آخر شمعة هابطة قبل displacement صاعد يكسر قمة سابقة
-            bullish_ob_cond = prev_bearish & (df['close'] > df['open']) & df['strong_body'] & df['close_near_high'] & bullish_bos
-            
-            # Bearish OB: آخر شمعة صاعدة قبل displacement هابط يكسر قاع سابق
-            bearish_ob_cond = prev_bullish & (df['close'] < df['open']) & df['strong_body'] & df['close_near_low'] & bearish_bos
+            require_sweep = getattr(Config, "REQUIRE_LIQUIDITY_SWEEP_FOR_OB", True)
+
+            base_bullish_ob_cond = (
+                prev_bearish &
+                (df["close"] > df["open"]) &
+                df["strong_body"] &
+                df["close_near_high"] &
+                bullish_bos
+            )
+
+            base_bearish_ob_cond = (
+                prev_bullish &
+                (df["close"] < df["open"]) &
+                df["strong_body"] &
+                df["close_near_low"] &
+                bearish_bos
+            )
+
+            if require_sweep:
+                bullish_ob_cond = base_bullish_ob_cond & df["recent_sell_side_sweep"]
+                bearish_ob_cond = base_bearish_ob_cond & df["recent_buy_side_sweep"]
+            else:
+                bullish_ob_cond = base_bullish_ob_cond
+                bearish_ob_cond = base_bearish_ob_cond
             
             # 7. تخزين مناطق الـ Order Blocks (Zones)
             df['ob_bullish_low'] = np.nan
@@ -225,7 +285,11 @@ class TAEngine:
                 'ema_200': ema_200,
                 'ema_50': ema_50,
                 'adx': latest.get('adx', 0),
-                'rsi': latest.get('rsi', 0)
+                'rsi': latest.get('rsi', 0),
+                "sell_side_sweep": bool(latest.get("sell_side_sweep", False)),
+                "buy_side_sweep": bool(latest.get("buy_side_sweep", False)),
+                "recent_sell_side_sweep": bool(latest.get("recent_sell_side_sweep", False)),
+                "recent_buy_side_sweep": bool(latest.get("recent_buy_side_sweep", False))
             })
             
         return trend_result

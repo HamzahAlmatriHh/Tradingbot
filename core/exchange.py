@@ -194,6 +194,122 @@ class ExchangeClient:
             
         return sl_success and tp_success
 
+    def place_full_sl(self, symbol, side, sl_price):
+        """
+        وضع Stop Loss كامل يغلق أي كمية متبقية من الصفقة.
+        يستخدم closePosition=True، وهذا مناسب للـ SL حتى بعد الخروج الجزئي.
+        """
+        close_side = "sell" if side.lower() == "buy" else "buy"
+        position_side = "LONG" if side.lower() == "buy" else "SHORT"
+
+        try:
+            params = {
+                "positionSide": position_side,
+                "stopPrice": sl_price,
+                "closePosition": True
+            }
+
+            order = self.exchange.create_order(
+                symbol,
+                "STOP_MARKET",
+                close_side,
+                None,
+                None,
+                params
+            )
+
+            logger.info(f"✅ تم وضع SL كامل عند {sl_price} | order={order.get('id')}")
+            return order
+
+        except Exception as e:
+            logger.error(f"فشل وضع SL كامل لـ {symbol}: {e}")
+            return None
+
+    def place_partial_tp(self, symbol, side, amount, tp_price, client_order_id=None):
+        """
+        وضع TP جزئي بكمية محددة.
+        لا نستخدم closePosition هنا حتى لا يغلق كامل الصفقة.
+        """
+        close_side = "sell" if side.lower() == "buy" else "buy"
+        position_side = "LONG" if side.lower() == "buy" else "SHORT"
+
+        params = {
+            "positionSide": position_side,
+            "stopPrice": tp_price,
+        }
+
+        if client_order_id:
+            params["newClientOrderId"] = client_order_id
+
+        try:
+            order = self.exchange.create_order(
+                symbol,
+                "TAKE_PROFIT_MARKET",
+                close_side,
+                amount,
+                None,
+                params
+            )
+
+            logger.info(
+                f"✅ تم وضع TP جزئي لـ {symbol} | كمية={amount} | السعر={tp_price} | order={order.get('id')}"
+            )
+            return order
+
+        except Exception as e:
+            logger.error(f"فشل وضع TP جزئي لـ {symbol}: {e}")
+            return None
+
+    def place_partial_protection(self, symbol, side, amount, sl_price, tp1_price, partial_pct=0.5):
+        """
+        حماية صفقة بنظام:
+        - SL كامل closePosition.
+        - TP1 جزئي بكمية محددة.
+        """
+        try:
+            partial_amount = amount * partial_pct
+
+            sl_order = self.place_full_sl(symbol, side, sl_price)
+            if not sl_order:
+                return {
+                    "success": False,
+                    "reason": "failed_full_sl"
+                }
+
+            tp_client_id = f"tp1_{symbol.replace('/', '').replace(':', '')}_{int(pd.Timestamp.utcnow().timestamp())}"
+
+            tp1_order = self.place_partial_tp(
+                symbol=symbol,
+                side=side,
+                amount=partial_amount,
+                tp_price=tp1_price,
+                client_order_id=tp_client_id
+            )
+
+            if not tp1_order:
+                # إذا فشل TP1، نترك SL موجود لحماية الصفقة، لكن نُرجع تحذير
+                return {
+                    "success": False,
+                    "reason": "failed_partial_tp",
+                    "sl_order_id": sl_order.get("id"),
+                }
+
+            return {
+                "success": True,
+                "sl_order_id": sl_order.get("id"),
+                "tp1_order_id": tp1_order.get("id"),
+                "tp1_client_id": tp_client_id,
+                "partial_amount": partial_amount,
+                "runner_amount": amount - partial_amount,
+            }
+
+        except Exception as e:
+            logger.error(f"فشل place_partial_protection لـ {symbol}: {e}")
+            return {
+                "success": False,
+                "reason": str(e)
+            }
+
     def cancel_all_orders(self, symbol):
         """إلغاء كافة الأوامر المفتوحة للعملة (مثل الهدف والستوب)"""
         try:

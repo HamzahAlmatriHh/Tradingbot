@@ -28,7 +28,7 @@ class Config:
     TRADE_SYMBOL = "BTC/USDT"
     RISK_PER_TRADE_PERCENT = 0.25 # تم التخفيض بناءً على مراجعة الأمان
     LEVERAGE = 1                  # رافعة مالية 1x (بدون رافعة فعلية) للنسخة الحية
-    MAX_OPEN_TRADES = 6           # تم زيادته إلى 6 صفقات في نفس الوقت
+    MAX_OPEN_TRADES = 2           # تم خفضه إلى 2 صفقة كبداية للاختبار
     DAILY_LOSS_LIMIT_PERCENT = 1.0 # إيقاف صارم إذا خسر 1% يومياً
 
     # [إعدادات فلتر أمان السوق - Universe Filter]
@@ -53,7 +53,7 @@ class Config:
     # [إعدادات Testnet التفصيلية]
     TESTNET_DEBUG_MODE = True
     TESTNET_RELAXED_ENTRY = True
-    TESTNET_MAX_OPEN_TRADES = 6
+    TESTNET_MAX_OPEN_TRADES = 2
     TESTNET_RISK_MULTIPLIER = 1.0
     
     # ملاحظة هامة: هذا الشرط يعمل فقط في وضع التجريبي (Testnet) لمحاكاة محفظة صغيرة (مثلاً 50$). 
@@ -69,6 +69,24 @@ class Config:
 
     REPORT_TZ = os.getenv("REPORT_TZ", "Asia/Aden")
     REPORT_RECENT_TRADES_LIMIT = int(os.getenv("REPORT_RECENT_TRADES_LIMIT", 10))
+
+    # [SMC Liquidity Sweep Filter]
+    REQUIRE_LIQUIDITY_SWEEP_FOR_OB = True
+    LIQUIDITY_SWEEP_LOOKBACK = 10       # كم شمعة نستخدم لاستخراج القمم/القيعان السابقة
+    LIQUIDITY_SWEEP_RECENT_BARS = 8     # يجب أن يكون السويب قريبًا من الـ OB
+
+    # [Partial TP & Runner]
+    PARTIAL_TP_ENABLED = True
+    PARTIAL_TP_PCT = 0.50              # إغلاق 50%
+    MOVE_SL_TO_BE_AFTER_TP1 = True
+    BREAKEVEN_BUFFER_PCT = 0.001       # 0.1% فوق الدخول للشراء وتحت الدخول للبيع
+    RUNNER_USE_TRAILING = True
+
+    # [Scan Scheduler]
+    SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", 900))  # 15 دقيقة افتراضيًا
+    MIN_SCAN_INTERVAL_SECONDS = 300     # 5 دقائق
+    MAX_SCAN_INTERVAL_SECONDS = 3600    # ساعة
+    MONITOR_TICK_SECONDS = 10
 
     # [إعدادات فلتر المشتقات - CoinGlass Filter]
     DERIVATIVES_FILTER_MODE = "enforce"     # off / audit (مراقبة فقط) / enforce (حظر فعلي)
