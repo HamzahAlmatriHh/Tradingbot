@@ -79,14 +79,11 @@ class TradeApproachAlertManager:
 
     def _get_alert_state(self, trade_id):
         key = f"trade_alerts:{trade_id}"
-        state = self.state_manager.get_state()
-        return state.get(key, {})
+        return self.state_manager.get(key, {})
 
     def _save_alert_state(self, trade_id, alert_state):
         key = f"trade_alerts:{trade_id}"
-        state = self.state_manager.get_state()
-        state[key] = alert_state
-        self.state_manager.save_state()
+        self.state_manager.set(key, alert_state)
 
     def _send_tp_alert(self, symbol, side, current_price, current_r, target_r, tp):
         msg = (

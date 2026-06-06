@@ -1,6 +1,7 @@
 import time
 import os
 import csv
+import threading
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -1372,7 +1373,7 @@ def main():
     ta_engine      = TAEngine()
     social_engine  = SocialEngine()
     universe_filter = UniverseFilter(client)
-    derivatives_filter = DerivativesRiskFilter()
+    derivatives_filter = DerivativesRiskFilter(state_manager=state_manager)
     
     # تشغيل نظام الاستماع لأوامر التيليجرام في الخلفية
     notifier.start_polling(client, state_manager, ai_engine, ta_engine, news_engine, social_engine)
@@ -1484,13 +1485,17 @@ def main():
             if getattr(Config, "API_HEALTH_CHECK_ENABLED", True):
                 interval_sec = getattr(Config, "API_HEALTH_CHECK_INTERVAL_MINUTES", 60) * 60
                 if time.time() - last_api_health_check >= interval_sec:
-                    try:
-                        logger.info("🧪 بدء فحص دوري لكل خدمات API...")
-                        payload = api_status_monitor.run_full_check()
-                        api_status_monitor.notify_if_needed(payload)
-                        last_api_health_check = time.time()
-                    except Exception as e:
-                        logger.error(f"فشل الفحص الدوري لخدمات API: {e}")
+                    last_api_health_check = time.time()
+
+                    def _api_health_job():
+                        try:
+                            logger.info("🧪 بدء فحص دوري لكل خدمات API...")
+                            payload = api_status_monitor.run_full_check()
+                            api_status_monitor.notify_if_needed(payload)
+                        except Exception as e:
+                            logger.error(f"فشل الفحص الدوري لخدمات API: {e}")
+
+                    threading.Thread(target=_api_health_job, daemon=True).start()
 
             time.sleep(monitor_tick)
 

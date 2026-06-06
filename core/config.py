@@ -4,6 +4,32 @@ from dotenv import load_dotenv
 # تحميل المتغيرات من ملف .env
 load_dotenv()
 
+def split_keys(value):
+    if not value:
+        return []
+    return [
+        k.strip()
+        for k in str(value).split(",")
+        if k and k.strip() and "your_" not in k.lower()
+    ]
+
+def merge_keys(*values):
+    keys = []
+    for value in values:
+        if isinstance(value, list):
+            keys.extend(value)
+        else:
+            keys.extend(split_keys(value))
+
+    # إزالة التكرار مع الحفاظ على الترتيب
+    cleaned = []
+    seen = set()
+    for key in keys:
+        if key not in seen:
+            cleaned.append(key)
+            seen.add(key)
+    return cleaned
+
 class Config:
     # Binance Config
     BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
@@ -34,60 +60,33 @@ class Config:
     # ==========================================================
     # API Key Pools / Failover Rotation
     # ==========================================================
-    @staticmethod
-    def _split_keys(value):
-        if not value:
-            return []
-        return [
-            k.strip()
-            for k in str(value).split(",")
-            if k and k.strip() and "your_" not in k.lower()
-        ]
 
-    @staticmethod
-    def _merge_keys(*values):
-        keys = []
-        for value in values:
-            if isinstance(value, list):
-                keys.extend(value)
-            else:
-                keys.extend(Config._split_keys(value))
-
-        # إزالة التكرار مع الحفاظ على الترتيب
-        cleaned = []
-        seen = set()
-        for key in keys:
-            if key not in seen:
-                cleaned.append(key)
-                seen.add(key)
-        return cleaned
-
-    COINGLASS_API_KEYS = _merge_keys.__func__(
+    COINGLASS_API_KEYS = merge_keys(
         os.getenv("COINGLASS_API_KEY"),
         os.getenv("COINGLASS_API_KEYS")
     )
 
-    NEWS_API_KEYS = _merge_keys.__func__(
+    NEWS_API_KEYS = merge_keys(
         os.getenv("NEWS_API_KEY"),
         os.getenv("NEWS_API_KEYS")
     )
 
-    CRYPTOPANIC_API_KEYS = _merge_keys.__func__(
+    CRYPTOPANIC_API_KEYS = merge_keys(
         os.getenv("CRYPTOPANIC_API_KEY"),
         os.getenv("CRYPTOPANIC_API_KEYS")
     )
 
-    GROQ_API_KEYS = _merge_keys.__func__(
+    GROQ_API_KEYS = merge_keys(
         os.getenv("GROQ_API_KEY"),
         os.getenv("GROQ_API_KEYS")
     )
 
-    LUNARCRUSH_API_KEYS = _merge_keys.__func__(
+    LUNARCRUSH_API_KEYS = merge_keys(
         os.getenv("LUNARCRUSH_API_KEY"),
         os.getenv("LUNARCRUSH_API_KEYS")
     )
 
-    COINGECKO_API_KEYS = _merge_keys.__func__(
+    COINGECKO_API_KEYS = merge_keys(
         os.getenv("COINGECKO_API_KEY"),
         os.getenv("COINGECKO_API_KEYS")
     )
