@@ -6,6 +6,7 @@ import sys
 from html import escape
 from core.config import Config
 from core.logger import logger
+from utils.performance_tracker import PerformanceTracker
 
 
 class TelegramNotifier:
@@ -85,6 +86,14 @@ class TelegramNotifier:
                 [
                     {"text": "📊 حالة البوت", "callback_data": "gui_status"},
                     {"text": "🧠 تحليل عملة", "callback_data": "gui_analyze"},
+                ],
+                [
+                    {"text": "📆 تقرير يومي", "callback_data": "report_daily"},
+                    {"text": "🗓️ تقرير أسبوعي", "callback_data": "report_weekly"},
+                ],
+                [
+                    {"text": "📅 تقرير شهري", "callback_data": "report_monthly"},
+                    {"text": "🏆 تقرير سنوي", "callback_data": "report_yearly"},
                 ],
                 [
                     {"text": "🩺 صحة النظام", "callback_data": "gui_health"},
@@ -428,11 +437,16 @@ class TelegramNotifier:
         # ميزة الرصيد الوهمي المقيد.
         simulated_cap = getattr(Config, "TESTNET_SIMULATED_BALANCE", 0)
         if getattr(Config, "USE_TESTNET", False) and simulated_cap > 0:
-            usdt_available = min(usdt_available, simulated_cap)
-            wallet_balance = min(wallet_balance, simulated_cap + total_unrealized)
+            tracker = PerformanceTracker(state_manager)
+            sim_wallet = tracker.get_wallet(unrealized_pnl=total_unrealized)
 
-        initial = state_manager.get_initial_balance()
-        pnl_day = wallet_balance - initial if initial else 0
+            wallet_balance = sim_wallet["equity"]
+            usdt_available = sim_wallet["available"]
+            total_margin = sim_wallet["reserved_margin"]
+            pnl_day = wallet_balance - state_manager.get_initial_balance() if state_manager.get_initial_balance() else 0
+        else:
+            initial = state_manager.get_initial_balance()
+            pnl_day = wallet_balance - initial if initial else 0
 
         # 2. جلب الصفقات مباشرة من باينانس.
         try:
@@ -456,6 +470,10 @@ class TelegramNotifier:
         msg += f"📈 <b>ربح/خسارة اليوم:</b> <code>{pnl_day:+.2f}</code> USDT\n"
         msg += f"📌 <b>الهامش/المحفظة:</b> <code>{float(total_margin):.2f}</code> USDT\n"
         msg += f"🟢 <b>الصفقات المفتوحة:</b> <code>{len(live_positions)}</code>\n"
+
+        if getattr(Config, "USE_TESTNET", False) and simulated_cap > 0:
+            msg += f"🧪 <b>وضع المحفظة:</b> <code>Simulated Wallet</code>\n"
+            msg += f"🏁 <b>رأس البداية الوهمي:</b> <code>{simulated_cap:.2f}</code> USDT\n"
 
         max_trades = getattr(Config, "TESTNET_MAX_OPEN_TRADES", None)
         if max_trades is not None:
@@ -760,6 +778,19 @@ class TelegramNotifier:
                         "⚠️ تعذر تحديث حالة البوت حالياً.",
                         self.main_menu_keyboard(),
                     )
+
+            elif data in ["report_daily", "report_weekly", "report_monthly", "report_yearly"]:
+                period = data.replace("report_", "")
+                tracker = PerformanceTracker(state_manager)
+                text = tracker.format_report(period)
+
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    text,
+                    reply_markup=self.back_home_keyboard()
+                )
+                self.answer_callback(callback_id, "تم إنشاء التقرير ✅")
 
             elif data == "gui_health":
                 self.edit_message(

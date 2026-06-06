@@ -3,7 +3,7 @@ import os
 import csv
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.logger import logger
 from core.exchange import ExchangeClient
 from engines.news_engine import NewsEngine
@@ -16,29 +16,100 @@ from strategy.trailing_stop import TrailingStopManager
 from strategy.alert_manager import TradeApproachAlertManager
 from utils.telegram_bot import TelegramNotifier
 from utils.state_manager import StateManager
+from utils.performance_tracker import PerformanceTracker
 from core.config import Config
 from core.universe_filter import UniverseFilter
 from filters.derivatives_risk_filter import DerivativesRiskFilter
+
+def maybe_send_periodic_reports(notifier, state_manager):
+    """
+    يرسل تقارير Daily / Weekly / Monthly / Yearly مرة واحدة فقط لكل فترة.
+    تعتمد على testnet_trades_log.csv كمصدر حقيقة.
+    """
+    now = datetime.now()
+
+    tracker = PerformanceTracker(state_manager)
+
+    def get_marker_key(period):
+        if period == "daily":
+            return now.strftime("%Y-%m-%d")
+        if period == "weekly":
+            iso = now.isocalendar()
+            return f"{iso.year}-W{iso.week}"
+        if period == "monthly":
+            return now.strftime("%Y-%m")
+        if period == "yearly":
+            return now.strftime("%Y")
+        return now.strftime("%Y-%m-%d")
+
+    def already_sent(period):
+        markers = state_manager.get("report_markers", {})
+        return markers.get(period) == get_marker_key(period)
+
+    def mark_sent(period):
+        markers = state_manager.get("report_markers", {})
+        markers[period] = get_marker_key(period)
+        state_manager.set("report_markers", markers)
+
+    def send_report(period):
+        try:
+            text = tracker.format_report(period)
+            ok = notifier.send_message(text)
+            if ok:
+                mark_sent(period)
+                logger.info(f"تم إرسال التقرير {period} بنجاح.")
+        except Exception as e:
+            logger.error(f"فشل إرسال التقرير {period}: {e}")
+
+    # يومي: آخر اليوم
+    if now.hour == 23 and now.minute >= 55 and not already_sent("daily"):
+        send_report("daily")
+
+    # أسبوعي: نهاية الأحد
+    if now.weekday() == 6 and now.hour == 23 and now.minute >= 55 and not already_sent("weekly"):
+        send_report("weekly")
+
+    # شهري: آخر يوم من الشهر
+    tomorrow = now + timedelta(days=1)
+    is_last_day_of_month = tomorrow.month != now.month
+    if is_last_day_of_month and now.hour == 23 and now.minute >= 55 and not already_sent("monthly"):
+        send_report("monthly")
+
+    # سنوي: 31 ديسمبر
+    if now.month == 12 and now.day == 31 and now.hour == 23 and now.minute >= 55 and not already_sent("yearly"):
+        send_report("yearly")
+
 
 def log_testnet_trade(symbol, entry_meta, exit_details):
     """
     تسجيل الصفقات الفردية لـ Testnet بالكامل في ملف CSV محلي
     """
-    file_path = "testnet_trades_log.csv"
+    file_path = getattr(Config, "TESTNET_TRADES_LOG", "testnet_trades_log.csv")
+    os.makedirs(os.path.dirname(os.path.abspath(file_path)) or ".", exist_ok=True)
     file_exists = os.path.exists(file_path)
     
     headers = [
-        "symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price",
+        "trade_id", "symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price",
         "pnl", "pnl_pct", "exit_reason", "entry_reason", "sentiment_score", "adx",
-        "ema_200", "atr", "spread", "volume_24h", "risk_pct", "leverage", "slippage"
+        "ema_200", "atr", "spread", "volume_24h", "risk_pct", "leverage", "slippage",
+        "amount"
     ]
     
+    exit_time = exit_details.get("exit_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    entry_time = entry_meta.get("entry_time", "")
+
+    trade_id = entry_meta.get("trade_id") or (
+        f"{symbol}|{entry_meta.get('side', '')}|{entry_time}|"
+        f"{entry_meta.get('entry_price', 0.0)}|{exit_time}|{exit_details.get('exit_price', 0.0)}"
+    )
+    
     row = {
+        "trade_id": trade_id,
         "symbol": symbol,
         "side": entry_meta.get("side", ""),
-        "entry_time": entry_meta.get("entry_time", ""),
+        "entry_time": entry_time,
         "entry_price": entry_meta.get("entry_price", 0.0),
-        "exit_time": exit_details.get("exit_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        "exit_time": exit_time,
         "exit_price": exit_details.get("exit_price", 0.0),
         "pnl": exit_details.get("pnl", 0.0),
         "pnl_pct": exit_details.get("pnl_pct", 0.0),
@@ -51,8 +122,9 @@ def log_testnet_trade(symbol, entry_meta, exit_details):
         "spread": entry_meta.get("spread", 0.0),
         "volume_24h": entry_meta.get("volume_24h", 0.0),
         "risk_pct": entry_meta.get("risk_pct", 0.0),
-        "leverage": entry_meta.get("leverage", 0.0),
-        "slippage": exit_details.get("slippage", 0.0)
+        "leverage": entry_meta.get("leverage", 1.0),
+        "slippage": exit_details.get("slippage", 0.0),
+        "amount": entry_meta.get("amount", 0.0),
     }
     
     try:
@@ -194,6 +266,17 @@ def handle_trade_close(alert, state_manager):
     }
     
     log_testnet_trade(symbol, entry_meta, exit_details)
+    
+    try:
+        tracker = PerformanceTracker(state_manager)
+        wallet = tracker.get_wallet()
+        logger.info(
+            f"[SimWallet] الرصيد التراكمي بعد إغلاق {symbol}: "
+            f"{wallet['wallet_balance']:.2f} USDT | "
+            f"Realized: {wallet['realized_pnl']:+.2f} USDT"
+        )
+    except Exception as e:
+        logger.error(f"[SimWallet] فشل تحديث المحفظة الوهمية بعد الإغلاق: {e}")
     
     # --- تطبيق PairLocks (التبريد بعد الخسارة) ---
     is_profit = pnl_val > 0
@@ -389,14 +472,6 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
     # مزامنة الصفقات للتأكد من أن الذاكرة متوافقة مع منصة باينانس (لتنظيف الصفقات المغلقة أو غير المعروفة)
     reconcile_positions(client, state_manager)
     
-    # تحقق من وقت التقرير اليومي المقارن
-    today_date = datetime.now().strftime("%Y-%m-%d")
-    if state_manager.state.get("last_daily_report_date") != today_date:
-        try:
-            send_daily_performance_report(client, state_manager, notifier)
-        except Exception as e:
-            logger.error(f"خطأ أثناء توليد التقرير اليومي: {e}")
-
     active_symbols = state_manager.get_active_symbols()
         
     logger.info("=========================================")
@@ -436,13 +511,29 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
     # [ميزة الرصيد الوهمي]: تقييد الرصيد المستخدم للمحاكاة (مثال: 50 دولار فقط بدلاً من 100 ألف)
     # ملاحظة: هذا التقييد يعمل *فقط* في الـ Testnet (التجريبي). 
     # بمجرد تحويل البوت للحساب الحقيقي (USE_TESTNET=False) سيتم إلغاء هذا التقييد برمجياً وسيعتمد على الرصيد الفعلي في منصة باينانس.
-    simulated_cap = getattr(Config, 'TESTNET_SIMULATED_BALANCE', 0)
-    if getattr(Config, 'USE_TESTNET', False) and simulated_cap > 0:
-        usdt_free = min(usdt_free, simulated_cap)
-        usdt_total = min(usdt_total, simulated_cap)
-        logger.info(f"الرصيد المتاح: {usdt_free:.2f} USDT | الإجمالي (Equity الوهمي المقيّد): {usdt_total:.2f} USDT")
+    simulated_cap = getattr(Config, "TESTNET_SIMULATED_BALANCE", 0)
+
+    if getattr(Config, "USE_TESTNET", False) and simulated_cap > 0:
+        info = balance.get("info", {}) if balance else {}
+        total_unrealized = float(info.get("totalUnrealizedProfit", 0) or 0)
+
+        tracker = PerformanceTracker(state_manager)
+        sim_wallet = tracker.get_wallet(unrealized_pnl=total_unrealized)
+
+        usdt_total = sim_wallet["equity"]
+        usdt_free = sim_wallet["available"]
+
+        logger.info(
+            f"[SimWallet] الرصيد المتاح: {usdt_free:.2f} USDT | "
+            f"Equity وهمي: {usdt_total:.2f} USDT | "
+            f"Realized: {sim_wallet['realized_pnl']:+.2f} USDT | "
+            f"Unrealized: {sim_wallet['unrealized_pnl']:+.2f} USDT"
+        )
     else:
-        logger.info(f"الرصيد المتاح: {usdt_free:.2f} USDT | الإجمالي (Equity): {usdt_total:.2f} USDT")
+        logger.info(
+            f"الرصيد المتاح: {usdt_free:.2f} USDT | "
+            f"الإجمالي Equity: {usdt_total:.2f} USDT"
+        )
     
     # تحديث الرصيد اليومي (المرجعي) بناءً على الرصيد الإجمالي
     if usdt_total > 0:
@@ -1114,6 +1205,11 @@ def main():
                 
                 notifier.send_message(f"✅ <b>Bot is alive & running</b>\nMode: <code>{mode_str}</code>\nOpen trades: {active_count}/{max_trades}\nState file: <code>{os.getenv('STATE_FILE', 'bot_state.json')}</code>")
                 last_heartbeat_time = current_timestamp
+
+            try:
+                maybe_send_periodic_reports(notifier, state_manager)
+            except Exception as e:
+                logger.error(f"فشل فحص التقارير الدورية: {e}")
 
             check_network_connection(client)
             run_bot_iteration(

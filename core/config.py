@@ -59,7 +59,17 @@ class Config:
     # ملاحظة هامة: هذا الشرط يعمل فقط في وضع التجريبي (Testnet) لمحاكاة محفظة صغيرة (مثلاً 50$). 
     # عندما تقوم بربط البوت بالحساب الحقيقي (USE_TESTNET=False)، سيتم إلغاء هذا الشرط تلقائياً وسيعتمد البوت على الرصيد الحقيقي بالكامل.
     TESTNET_SIMULATED_BALANCE = float(os.getenv("TESTNET_SIMULATED_BALANCE", 50.0))  
-    
+
+    # [إعدادات المحفظة الوهمية والتقارير]
+    DATA_DIR = os.getenv("DATA_DIR", ".")
+    TESTNET_TRADES_LOG = os.getenv(
+        "TESTNET_TRADES_LOG",
+        os.path.join(DATA_DIR, "testnet_trades_log.csv")
+    )
+
+    REPORT_TZ = os.getenv("REPORT_TZ", "Asia/Aden")
+    REPORT_RECENT_TRADES_LIMIT = int(os.getenv("REPORT_RECENT_TRADES_LIMIT", 10))
+
     # [إعدادات فلتر المشتقات - CoinGlass Filter]
     DERIVATIVES_FILTER_MODE = "enforce"     # off / audit (مراقبة فقط) / enforce (حظر فعلي)
     MAX_FUNDING_RATE_ABS = 0.001          # 0.1% الحد الأقصى لمعدل التمويل المطلق المسموح به
