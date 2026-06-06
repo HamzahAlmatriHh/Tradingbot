@@ -61,6 +61,23 @@ class Config:
     DAILY_LOSS_LIMIT_PERCENT = 1.0 # إيقاف صارم إذا خسر 1% يومياً
 
     # ==========================================================
+    # Virtual Orders / Sniper Pending Orders Lifecycle
+    # ==========================================================
+    VIRTUAL_ORDER_MAX_AGE_MINUTES_STRICT = int(os.getenv("VIRTUAL_ORDER_MAX_AGE_MINUTES_STRICT", 90))
+    VIRTUAL_ORDER_MAX_AGE_MINUTES_MEDIUM = int(os.getenv("VIRTUAL_ORDER_MAX_AGE_MINUTES_MEDIUM", 60))
+    VIRTUAL_ORDER_MAX_AGE_MINUTES_RELAXED = int(os.getenv("VIRTUAL_ORDER_MAX_AGE_MINUTES_RELAXED", 30))
+
+    VIRTUAL_ORDER_CANCEL_IF_TP_HIT_FIRST = os.getenv("VIRTUAL_ORDER_CANCEL_IF_TP_HIT_FIRST", "true").lower() == "true"
+    VIRTUAL_ORDER_CANCEL_IF_INVALIDATED = os.getenv("VIRTUAL_ORDER_CANCEL_IF_INVALIDATED", "true").lower() == "true"
+    VIRTUAL_ORDER_CANCEL_IF_TREND_FLIPS = os.getenv("VIRTUAL_ORDER_CANCEL_IF_TREND_FLIPS", "true").lower() == "true"
+
+    # إذا ابتعد السعر عن منطقة الدخول كثيرًا ولم يرجع، نعتبر الفرصة فاتت.
+    VIRTUAL_ORDER_MAX_DISTANCE_FROM_ENTRY_PCT = float(os.getenv("VIRTUAL_ORDER_MAX_DISTANCE_FROM_ENTRY_PCT", 0.04))
+
+    # كم شمعة 15m نستخدم لفحص تغيّر الترند.
+    VIRTUAL_ORDER_TREND_CHECK_LIMIT = int(os.getenv("VIRTUAL_ORDER_TREND_CHECK_LIMIT", 250))
+
+    # ==========================================================
     # API Key Pools / Failover Rotation
     # ==========================================================
 

@@ -69,9 +69,43 @@ class HealthMonitor:
             
         # حالة الدورة والإحصاءات
         msg += f"📊 <b>صفقات مفتوحة:</b> <code>{active_count}</code>\n"
-        msg += f"⏳ <b>فخاخ القناص (معلقة):</b> <code>{virtual_count}</code>\n"
+        msg += f"⏳ <b>فخاخ القناص:</b> <code>{virtual_count}</code>\n"
         msg += f"🔒 <b>عملات محظورة مؤقتاً:</b> <code>{locked_count}</code>\n"
         
+        virtual_orders = self.state_manager.get_virtual_orders()
+        if virtual_orders:
+            msg += "\n⏳ <b>تفاصيل فخاخ القناص:</b>\n"
+            now = datetime.now()
+            
+            def _parse_dt_safe(value):
+                try:
+                    if isinstance(value, float) or isinstance(value, int):
+                        return datetime.fromtimestamp(value)
+                    return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    return None
+
+            for sym, vo in list(virtual_orders.items())[:5]:
+                created_at = _parse_dt_safe(vo.get("created_at"))
+                expires_at = _parse_dt_safe(vo.get("expires_at"))
+
+                age_txt = "غير معروف"
+                left_txt = "غير معروف"
+
+                if created_at:
+                    age_min = int((now - created_at).total_seconds() / 60)
+                    age_txt = f"{age_min} دقيقة"
+
+                if expires_at:
+                    left_min = int((expires_at - now).total_seconds() / 60)
+                    left_txt = f"{max(left_min, 0)} دقيقة"
+
+                msg += (
+                    f"• <code>{sym}</code> | "
+                    f"عمر: <code>{age_txt}</code> | "
+                    f"ينتهي بعد: <code>{left_txt}</code>\n"
+                )
+                
         return msg
         
     def send_health_report(self):

@@ -1019,9 +1019,34 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
                     if symbol not in state_manager.get_virtual_orders():
                         logger.info(f"🎯 [Sniper] السعر {current_price:.4f} يقترب من Order Block {optimal_entry:.4f}. إرسال تنبيه وحفظ أمر معلق...")
                         notifier.send_message(f"⚠️ <b>تنبيه تحضيري (Pre-Signal):</b>\nالزوج <code>{symbol}</code> يقترب من منطقة مؤسسية (Order Block) عند سعر <code>{optimal_entry:.4f}</code>.\n(جاري المراقبة لانتظار إغلاق الشمعة وتأكيد السيولة...)")
+                        from strategy.filter_profiles import get_filter_profile
+                        from datetime import datetime, timedelta
+                        
+                        filter_profile = get_filter_profile(state_manager)
+                        profile_key = filter_profile.get("key", "strict")
+
+                        if profile_key == "strict":
+                            max_age_minutes = getattr(Config, "VIRTUAL_ORDER_MAX_AGE_MINUTES_STRICT", 90)
+                        elif profile_key == "medium":
+                            max_age_minutes = getattr(Config, "VIRTUAL_ORDER_MAX_AGE_MINUTES_MEDIUM", 60)
+                        else:
+                            max_age_minutes = getattr(Config, "VIRTUAL_ORDER_MAX_AGE_MINUTES_RELAXED", 30)
+
+                        created_at = datetime.now()
+                        expires_at = created_at + timedelta(minutes=max_age_minutes)
+                        
+                        sl = float(invalidation_level)
+                        if final_decision.lower() == 'buy':
+                            tp = float(optimal_entry + (optimal_entry - sl) * 2)
+                        else:
+                            tp = float(optimal_entry - (sl - optimal_entry) * 2)
+
                         virtual_order = {
                             "side": final_decision,
+                            "entry_price": float(optimal_entry),
                             "optimal_entry": float(optimal_entry),
+                            "sl": float(sl),
+                            "tp": float(tp),
                             "invalidation_level": float(invalidation_level),
                             "ob_mid": float(coin_data.get('ob_mid', optimal_entry)),
                             "amount": float(amount),
@@ -1030,7 +1055,19 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
                             "resistance": float(coin_data.get('resistance', 0)),
                             "trade_leverage": int(trade_leverage),
                             "trade_risk_pct": float(trade_risk_pct),
-                            "created_at": datetime.now().timestamp(),
+                            
+                            "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                            "expires_at": expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+                            "max_age_minutes": max_age_minutes,
+                            "filter_profile": profile_key,
+                            
+                            "cancel_if_tp_hit_first": True,
+                            "cancel_if_invalidated": True,
+                            "cancel_if_trend_flips": True,
+                            "created_price": float(current_price),
+                            "created_reason": coin_data.get("reason", ""),
+                            "created_ta_signal": ta_trend,
+                            
                             "sentiment_label": sentiment.get('label', 'neutral') if sentiment else 'neutral',
                             "sentiment_score": float(sentiment.get('score') or sentiment.get('galaxy_score') or 0.0) if sentiment else 0.0,
                             "ta_trend": ta_trend,
@@ -1102,6 +1139,117 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
     notifier.send_message(summary)
     return usdt_total
 
+def _parse_dt_safe(value):
+    try:
+        if isinstance(value, float) or isinstance(value, int):
+            return datetime.fromtimestamp(value)
+        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+def get_current_price_from_ticker(client, symbol):
+    try:
+        ticker = client.exchange.fetch_ticker(symbol)
+        return float(
+            ticker.get("last")
+            or ticker.get("close")
+            or ticker.get("bid")
+            or ticker.get("ask")
+            or 0.0
+        )
+    except Exception as e:
+        logger.warning(f"[VirtualOrderGuard] تعذر جلب السعر الحالي لـ {symbol}: {e}")
+        return 0.0
+
+def check_virtual_order_cancellation(client, symbol, v_order):
+    """
+    يفحص هل الأمر المعلق ما زال صالحًا أم يجب إلغاؤه.
+    يرجع:
+    - None إذا الأمر صالح.
+    - نص سبب الإلغاء إذا انتهت صلاحيته.
+    """
+    now = datetime.now()
+
+    side = str(v_order.get("side", "")).lower()
+    if side in ["long"]:
+        side = "buy"
+    elif side in ["short"]:
+        side = "sell"
+
+    entry = float(v_order.get("entry_price") or v_order.get("optimal_entry") or 0.0)
+    sl = float(v_order.get("sl") or v_order.get("invalidation_level") or 0.0)
+    tp = float(v_order.get("tp") or 0.0)
+    invalidation = float(v_order.get("invalidation_level") or sl or 0.0)
+
+    # 1. انتهاء الوقت
+    expires_at = _parse_dt_safe(v_order.get("expires_at"))
+    if expires_at and now > expires_at:
+        return f"انتهت صلاحية الأمر المعلق. expires_at={v_order.get('expires_at')}"
+
+    # 2. قراءة شموع قصيرة لمعرفة هل TP أو invalidation ضُرب قبل الدخول
+    try:
+        bars_1m = client.fetch_ohlcv(symbol, timeframe="1m", limit=20)
+        if bars_1m is None or bars_1m.empty:
+            current_price = get_current_price_from_ticker(client, symbol)
+            recent_high = current_price
+            recent_low = current_price
+            last_close = current_price
+        else:
+            recent_high = float(bars_1m["high"].max())
+            recent_low = float(bars_1m["low"].min())
+            last_close = float(bars_1m.iloc[-1]["close"])
+    except Exception as e:
+        logger.warning(f"[VirtualOrderGuard] فشل جلب شموع 1m لـ {symbol}: {e}")
+        current_price = get_current_price_from_ticker(client, symbol)
+        recent_high = current_price
+        recent_low = current_price
+        last_close = current_price
+
+    # 3. إذا ضرب الهدف المتوقع قبل أن يفعل الدخول، فالفرصة انتهت
+    if getattr(Config, "VIRTUAL_ORDER_CANCEL_IF_TP_HIT_FIRST", True) and tp > 0:
+        if side == "buy" and recent_high >= tp:
+            return f"تم إلغاء الأمر لأن السعر ضرب هدف الشراء قبل العودة للدخول. high={recent_high}, tp={tp}"
+        if side == "sell" and recent_low <= tp:
+            return f"تم إلغاء الأمر لأن السعر ضرب هدف البيع قبل العودة للدخول. low={recent_low}, tp={tp}"
+
+    # 4. إذا ضرب invalidation قبل الدخول، فالتحليل لم يعد صالحًا
+    if getattr(Config, "VIRTUAL_ORDER_CANCEL_IF_INVALIDATED", True) and invalidation > 0:
+        if side == "buy" and recent_low <= invalidation:
+            return f"تم إلغاء أمر الشراء لأن السعر كسر invalidation قبل الدخول. low={recent_low}, invalidation={invalidation}"
+        if side == "sell" and recent_high >= invalidation:
+            return f"تم إلغاء أمر البيع لأن السعر كسر invalidation قبل الدخول. high={recent_high}, invalidation={invalidation}"
+
+    # 5. إذا ابتعد السعر كثيرًا عن الدخول ولم يعد قريبًا، فالفرصة غالبًا فاتت
+    max_dist = float(getattr(Config, "VIRTUAL_ORDER_MAX_DISTANCE_FROM_ENTRY_PCT", 0.04))
+    if entry > 0 and last_close > 0:
+        distance = abs(last_close - entry) / entry
+        if distance >= max_dist:
+            return f"تم إلغاء الأمر لأن السعر ابتعد كثيرًا عن منطقة الدخول. distance={distance:.2%}"
+
+    # 6. فحص تغير الترند العام على 15m
+    if getattr(Config, "VIRTUAL_ORDER_CANCEL_IF_TREND_FLIPS", True):
+        try:
+            bars_15m = client.fetch_ohlcv(
+                symbol,
+                timeframe="15m",
+                limit=getattr(Config, "VIRTUAL_ORDER_TREND_CHECK_LIMIT", 250)
+            )
+
+            if bars_15m is not None and not bars_15m.empty and len(bars_15m) >= 210:
+                ema_50 = bars_15m["close"].ewm(span=50, adjust=False).mean().iloc[-1]
+                ema_200 = bars_15m["close"].ewm(span=200, adjust=False).mean().iloc[-1]
+
+                if side == "buy" and ema_50 < ema_200:
+                    return f"تم إلغاء أمر الشراء لأن ترند 15m أصبح هابطًا. EMA50 < EMA200"
+
+                if side == "sell" and ema_50 > ema_200:
+                    return f"تم إلغاء أمر البيع لأن ترند 15m أصبح صاعدًا. EMA50 > EMA200"
+
+        except Exception as e:
+            logger.warning(f"[VirtualOrderGuard] فشل فحص الترند للأمر المعلق {symbol}: {e}")
+
+    return None
+
 def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, risk_manager):
     """
     مراقبة الأوامر الافتراضية المعلقة (Virtual Pending Orders).
@@ -1119,11 +1267,21 @@ def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, ri
             state_manager.remove_virtual_order(symbol)
             continue
             
-        created_at = v_order.get("created_at", 0)
-        # الأمر المعلق يظل صالحاً لمدة 4 ساعات
-        if datetime.now().timestamp() - created_at > 4 * 3600:
-            logger.info(f"⏳ [Sniper] إلغاء الأمر المعلق لـ {symbol} لانتهاء مدة الصلاحية (4 ساعات).")
+        cancel_reason = check_virtual_order_cancellation(client, symbol, v_order)
+
+        if cancel_reason:
+            logger.warning(f"🧹 [VirtualOrder CANCELLED] {symbol}: {cancel_reason}")
             state_manager.remove_virtual_order(symbol)
+
+            try:
+                notifier.send_message(
+                    f"🧹 <b>إلغاء أمر قناص معلق</b>\n"
+                    f"الزوج: <code>{symbol}</code>\n"
+                    f"السبب: <code>{notifier._safe_html(cancel_reason)}</code>"
+                )
+            except Exception:
+                pass
+
             continue
             
         current_price = client.get_current_price(symbol)
