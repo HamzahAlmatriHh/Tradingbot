@@ -80,26 +80,26 @@ Here is the real-time data collected just now:
 - Latest News Context: "{news_text}"
 - Social Sentiment (Twitter/Reddit): "{social_text}"
 
-Based on this raw data, generate a Highly Professional, well-structured, and persuasive Trading Advice Report in ARABIC ONLY.
+Based on this raw data, generate a Highly Professional, well-structured, and VERY SHORT Trading Advice Report in ARABIC ONLY.
 Your report must strictly follow this format (use exactly these emojis and structure):
 
 🪙 **العملة:** {symbol}
 💰 **السعر اللحظي:** {current_price} $
 
-📊 **التحليل الفني:** (Briefly explain what RSI, EMA, and MACD are currently saying. e.g. "RSI indicates oversold, EMA shows bearish trend...")
-🛡️ **أقوى دعم مقترح:** (Estimate support based on ATR and Price)
-⚔️ **أقوى مقاومة مقترحة:** (Estimate resistance based on ATR and Price)
+📊 **التحليل الفني:** (1 short sentence explaining RSI, EMA, and MACD).
+🛡️ **دعم مقترح:** (Value based on ATR)
+⚔️ **مقاومة مقترحة:** (Value based on ATR)
+📰 **المشاعر والأخبار:** (1 short sentence).
 
-📰 **المشاعر والأخبار:** (Summarize the news and social sentiment impact in 1 sentence)
+💡 **القرار الذكي:** (LONG, SHORT, or WAIT in 1 short sentence).
+🎯 **الهدف (TP):** (Value) | 🛑 **الوقف (SL):** (Value)
+⚖️ **حجم الدخول:** (1% to 2%)
 
-💡 **التوصية والقرار الذكي:**
-(Write a clear action: LONG, SHORT, or WAIT. Tell the user EXACTLY what to do. E.g. "Wait until it drops to X, then LONG", or "Enter SHORT now").
-🎯 **الهدف المقترح (TP):** (Provide a calculated target price based on ATR or resistance/support)
-🛑 **وقف الخسارة المقترح (SL):** (Provide a calculated stop loss price)
-⚖️ **حجم الدخول المقترح:** (Suggest a risk allocation like 1% or 2% of capital, with justification).
-
-Note: Do NOT hallucinate. Be objective. Use the data given. If RSI is high and EMA is dropping, suggest caution or SHORT. If both are bullish, suggest LONG. If ADX is low, mention the trend is weak.
-DO NOT use code blocks or markdown brackets outside of bolding text. Answer entirely in Arabic.
+CRITICAL INSTRUCTIONS:
+- DO NOT hallucinate.
+- DO NOT use Chinese, Korean, or any Asian characters at all. Use ONLY pure Arabic letters and numbers.
+- Keep the response extremely short and easy to read on a mobile screen.
+- DO NOT use code blocks or markdown brackets outside of bolding text.
 """
         try:
             logger.info(f"جاري توليد التقرير الذكي لعملة {symbol}...")
