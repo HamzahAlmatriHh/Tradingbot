@@ -1,0 +1,1147 @@
+import time
+import os
+import csv
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from core.logger import logger
+from core.exchange import ExchangeClient
+from engines.news_engine import NewsEngine
+from engines.ai_engine import AIEngine
+from engines.ta_engine import TAEngine
+from engines.social_engine import SocialEngine
+from strategy.hybrid_logic import HybridStrategy
+from strategy.risk_manager import RiskManager
+from strategy.trailing_stop import TrailingStopManager
+from strategy.alert_manager import TradeApproachAlertManager
+from utils.telegram_bot import TelegramNotifier
+from utils.state_manager import StateManager
+from core.config import Config
+from core.universe_filter import UniverseFilter
+from filters.derivatives_risk_filter import DerivativesRiskFilter
+
+def log_testnet_trade(symbol, entry_meta, exit_details):
+    """
+    تسجيل الصفقات الفردية لـ Testnet بالكامل في ملف CSV محلي
+    """
+    file_path = "testnet_trades_log.csv"
+    file_exists = os.path.exists(file_path)
+    
+    headers = [
+        "symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price",
+        "pnl", "pnl_pct", "exit_reason", "entry_reason", "sentiment_score", "adx",
+        "ema_200", "atr", "spread", "volume_24h", "risk_pct", "leverage", "slippage"
+    ]
+    
+    row = {
+        "symbol": symbol,
+        "side": entry_meta.get("side", ""),
+        "entry_time": entry_meta.get("entry_time", ""),
+        "entry_price": entry_meta.get("entry_price", 0.0),
+        "exit_time": exit_details.get("exit_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        "exit_price": exit_details.get("exit_price", 0.0),
+        "pnl": exit_details.get("pnl", 0.0),
+        "pnl_pct": exit_details.get("pnl_pct", 0.0),
+        "exit_reason": exit_details.get("exit_reason", ""),
+        "entry_reason": entry_meta.get("entry_reason", ""),
+        "sentiment_score": entry_meta.get("sentiment_score", 0.0),
+        "adx": entry_meta.get("adx", 0.0),
+        "ema_200": entry_meta.get("ema_200", 0.0),
+        "atr": entry_meta.get("atr", 0.0),
+        "spread": entry_meta.get("spread", 0.0),
+        "volume_24h": entry_meta.get("volume_24h", 0.0),
+        "risk_pct": entry_meta.get("risk_pct", 0.0),
+        "leverage": entry_meta.get("leverage", 0.0),
+        "slippage": exit_details.get("slippage", 0.0)
+    }
+    
+    try:
+        with open(file_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+        logger.info(f"✅ تم تسجيل صفقة {symbol} في سجل الصفقات بنجاح.")
+    except Exception as e:
+        logger.error(f"❌ فشل تسجيل الصفقة في الملف المحلي: {e}")
+
+def execute_and_protect_trade(symbol, final_decision, amount, current_price, trade_leverage, trade_risk_pct, atr_val, coin_data, sentiment, bars_df, ticker, ta_trend, client, risk_manager, trailing_manager, state_manager, notifier, active_symbols, scan_results, invalidation_level=None):
+    """
+    دالة موحدة لتنفيذ أمر الماركت، حساب الستوب/الهدف الديناميكي (Sniper)، وضع الأوامر، وتحديث الحالة المحفوظة.
+    """
+    # حساب الستوب والهدف بناءً على السعر الحالي أولاً للتأكد من جودة الـ RR
+    sl, tp = risk_manager.calculate_sl_tp(
+        final_decision, 
+        current_price, 
+        support=coin_data.get('support'), 
+        resistance=coin_data.get('resistance'),
+        atr=atr_val,
+        invalidation_level=invalidation_level,
+        market_levels=coin_data.get('market_levels', {})
+    )
+    
+    if tp is None:
+        logger.warning(f"[{symbol}] ❌ تم إحباط التنفيذ: الـ RR سيء أو لا يوجد هدف سيولة مقابل.")
+        coin_data['decision'] = '🔴 REJECT'
+        coin_data['reason'] = "RR ضعيف حسب SMC Targets"
+        scan_results.append(coin_data)
+        return False
+
+    order = client.execute_trade(symbol, final_decision, amount, current_price=current_price, leverage=trade_leverage)
+    if order:
+        actual_entry = order.get('average') or order.get('price') or current_price
+        if not actual_entry or actual_entry == 0:
+            actual_entry = current_price
+            
+        # إعادة الضبط على السعر الفعلي بعد الانزلاق (Slippage)
+        sl, tp = risk_manager.calculate_sl_tp(
+            final_decision, 
+            actual_entry, 
+            support=coin_data.get('support'), 
+            resistance=coin_data.get('resistance'),
+            atr=atr_val,
+            invalidation_level=invalidation_level,
+            market_levels=coin_data.get('market_levels', {})
+        )
+        if tp is None:
+            # لو الانزلاق خرب الصفقة، نستخدم الهدف القديم مؤقتاً كخطة طوارئ
+            sl, tp = risk_manager.calculate_sl_tp(
+                final_decision, actual_entry, support=coin_data.get('support'), resistance=coin_data.get('resistance'), atr=atr_val, invalidation_level=invalidation_level
+            )
+        
+        logger.info(f"!!! تم تنفيذ إشارة تداول !!! لـ {symbol}")
+        logger.info(f"سعر التنفيذ الفعلي: {actual_entry:.4f} | الهدف: {tp:.4f} | الوقف: {sl:.4f}")
+        
+        sentiment_label = sentiment.get('label', 'neutral') if sentiment else 'neutral'
+        notifier.send_trade_alert(symbol, final_decision, amount, actual_entry, sl, tp, sentiment_label)
+        
+        logger.info("جاري وضع أوامر Stop Loss و Take Profit لحماية رأس المال...")
+        sl_tp_success = client.place_sl_tp(symbol, final_decision, amount, sl, tp)
+        
+        if not sl_tp_success:
+            logger.critical(f"⚠️ فشل وضع أوامر الحماية للزوج {symbol}! جاري إغلاق الصفقة...")
+            client.close_position(symbol, final_decision, amount)
+            notifier.send_message(f"⚠️ <b>تنبيه طارئ:</b> تم إغلاق صفقة {symbol} يدوياً بسبب فشل وضع الوقف والهدف.")
+            if symbol in active_symbols:
+                active_symbols.remove(symbol)
+                state_manager.save_active_symbols(active_symbols)
+            return False
+        
+        try:
+            latest_bar = bars_df.iloc[-2] if bars_df is not None and len(bars_df) > 1 else {}
+            entry_meta = {
+                "side": final_decision.upper(),
+                "entry_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "entry_price": float(actual_entry),
+                "amount": float(amount),
+                "sl": float(sl),
+                "tp": float(tp),
+                "entry_reason": coin_data.get('reason', f"فني:{ta_trend}"),
+                "sentiment_score": float(sentiment.get('score') or sentiment.get('galaxy_score') or 0.0) if sentiment else 0.0,
+                "adx": float(latest_bar.get('adx', 0.0)),
+                "ema_200": float(latest_bar.get('ema_200', 0.0)),
+                "atr": float(latest_bar.get('atr', 0.0)),
+                "spread": float((ticker.get('ask', 0) - ticker.get('bid', 0)) / ticker.get('bid', 1)) if ticker and ticker.get('bid', 0) > 0 else 0.0,
+                "volume_24h": float(ticker.get('quoteVolume', 0.0)) if ticker else 0.0,
+                "risk_pct": float(trade_risk_pct * 100),
+                "leverage": int(trade_leverage)
+            }
+            state_manager.save_entry_metadata(symbol, entry_meta)
+            logger.info(f"تم حفظ بيانات دخول صفقة {symbol} بنجاح.")
+        except Exception as e:
+            logger.error(f"خطأ أثناء حفظ بيانات دخول الصفقة: {e}")
+        
+        trailing_manager.register_trade(symbol, final_decision, actual_entry, sl)
+    
+        emoji = '🟢 BUY' if final_decision == 'buy' else '🔴 SELL'
+        coin_data['decision'] = emoji
+        coin_data['reason'] = f"تم التنفيذ | السعر: {actual_entry:.4f}"
+        scan_results.append(coin_data)
+        
+        active_symbols.add(symbol)
+        state_manager.save_active_symbols(active_symbols)
+        logger.info(f"تم فتح صفقة لـ {symbol}. إجمالي الصفقات المفتوحة: {len(active_symbols)}")
+        return True
+    return False
+
+def handle_trade_close(alert, state_manager):
+    """
+    معالجة إغلاق الصفقة: استخراج بيانات الدخول، حساب الانزلاق والنسبة المئوية، وتسجيل الصفقة في CSV
+    """
+    symbol = alert['symbol'].split(':')[0]
+    entry_meta = state_manager.pop_entry_metadata(symbol)
+    
+    is_sl = 'STOP' in alert['type']
+    target_exit = entry_meta.get('sl') if is_sl else entry_meta.get('tp')
+    actual_exit = float(alert.get('price', 0.0))
+    slippage_exit = 0.0
+    if target_exit and target_exit > 0 and actual_exit > 0:
+        slippage_exit = abs(actual_exit - target_exit) / target_exit
+        
+    pnl_val = float(alert.get('pnl', 0.0))
+    entry_price = float(entry_meta.get('entry_price', 0.0))
+    amount = float(entry_meta.get('amount', 0.0))
+    entry_notional = entry_price * amount
+    pnl_pct = (pnl_val / entry_notional * 100) if entry_notional > 0 else 0.0
+    
+    exit_details = {
+        "exit_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "exit_price": actual_exit,
+        "pnl": pnl_val,
+        "pnl_pct": pnl_pct,
+        "exit_reason": alert['type'],
+        "slippage": slippage_exit
+    }
+    
+    log_testnet_trade(symbol, entry_meta, exit_details)
+    
+    # --- تطبيق PairLocks (التبريد بعد الخسارة) ---
+    is_profit = pnl_val > 0
+    consecutive_losses = state_manager.record_trade_result(symbol, is_profit)
+    
+    if not is_profit:
+        if consecutive_losses >= 3:
+            # 3 خسائر -> قفل 24 ساعة
+            lock_until = datetime.now().timestamp() + (24 * 3600)
+            state_manager.lock_pair(symbol, lock_until, "خسارة 3 مرات متتالية")
+            logger.warning(f"🔒 [PairLocks] تم قفل {symbol} لمدة 24 ساعة بسبب 3 خسائر متتالية.")
+        elif consecutive_losses >= 2:
+            # خسارتين -> قفل 4 ساعات
+            lock_until = datetime.now().timestamp() + (4 * 3600)
+            state_manager.lock_pair(symbol, lock_until, "خسارة مرتين متتالية")
+            logger.warning(f"🔒 [PairLocks] تم قفل {symbol} لمدة 4 ساعات بسبب خسارتين متتاليتين.")
+            
+    return exit_details
+
+def send_daily_performance_report(client, state_manager, notifier):
+    """
+    توليد وإرسال التقرير اليومي للمقارنة بين التداول التجريبي (Testnet) والاختبار العكسي (Backtest)
+    """
+    logger.info("📊 جاري توليد التقرير اليومي للأداء والمقارنة...")
+    
+    testnet_csv = "testnet_trades_log.csv"
+    testnet_trades_count = 0
+    testnet_win_rate = 0.0
+    testnet_pf = 0.0
+    testnet_max_dd = 0.0
+    testnet_avg_slippage = 0.0
+    testnet_net_return = 0.0
+    
+    if os.path.exists(testnet_csv):
+        try:
+            df_test = pd.read_csv(testnet_csv)
+            if not df_test.empty:
+                testnet_trades_count = len(df_test)
+                pnls = pd.to_numeric(df_test['pnl'], errors='coerce').dropna().values
+                winners = pnls[pnls > 0]
+                losers = pnls[pnls <= 0]
+                
+                if testnet_trades_count > 0:
+                    testnet_win_rate = len(winners) / testnet_trades_count * 100
+                    
+                sum_win = winners.sum() if len(winners) > 0 else 0
+                sum_loss = abs(losers.sum()) if len(losers) > 0 else 0
+                testnet_pf = sum_win / sum_loss if sum_loss > 0 else (float('inf') if sum_win > 0 else 0.0)
+                
+                equity = [100.0]
+                pnl_pcts = pd.to_numeric(df_test.get('pnl_pct', df_test['pnl'] / 10.0), errors='coerce').fillna(0).values
+                for p_pct in pnl_pcts:
+                    equity.append(equity[-1] + p_pct)
+                
+                peak = equity[0]
+                for val in equity:
+                    if val > peak:
+                        peak = val
+                    dd = (peak - val) / peak * 100
+                    if dd > testnet_max_dd:
+                        testnet_max_dd = dd
+                        
+                slippages = pd.to_numeric(df_test['slippage'], errors='coerce').dropna().values
+                if len(slippages) > 0:
+                    testnet_avg_slippage = np.mean(slippages) * 100
+                    
+                testnet_net_return = sum(pnls)
+        except Exception as e:
+            logger.error(f"خطأ في معالجة سجل صفقات التجريبي: {e}")
+            
+    backtest_csv = "backtest_results.csv"
+    bt_trades_count = 0
+    bt_win_rate = 0.0
+    bt_pf = 0.0
+    bt_max_dd = 0.0
+    bt_net_return = 0.0
+    
+    if os.path.exists(backtest_csv):
+        try:
+            df_bt = pd.read_csv(backtest_csv)
+            if not df_bt.empty:
+                bt_trades_count = len(df_bt)
+                pnls_bt = pd.to_numeric(df_bt['pnl'], errors='coerce').dropna().values
+                winners_bt = pnls_bt[pnls_bt > 0]
+                losers_bt = pnls_bt[pnls_bt <= 0]
+                
+                if bt_trades_count > 0:
+                    bt_win_rate = len(winners_bt) / bt_trades_count * 100
+                    
+                sum_win_bt = winners_bt.sum() if len(winners_bt) > 0 else 0
+                sum_loss_bt = abs(losers_bt.sum()) if len(losers_bt) > 0 else 0
+                bt_pf = sum_win_bt / sum_loss_bt if sum_loss_bt > 0 else (float('inf') if sum_win_bt > 0 else 0.0)
+                
+                equity_bt = [100.0]
+                pnl_pcts_bt = pd.to_numeric(df_bt.get('pnl_pct', df_bt['pnl'] / 10.0), errors='coerce').fillna(0).values
+                for p_pct in pnl_pcts_bt:
+                    equity_bt.append(equity_bt[-1] + p_pct)
+                
+                peak_bt = equity_bt[0]
+                for val in equity_bt:
+                    if val > peak_bt:
+                        peak_bt = val
+                    dd = (peak_bt - val) / peak_bt * 100
+                    if dd > bt_max_dd:
+                        bt_max_dd = dd
+                        
+                bt_net_return = sum(pnls_bt)
+        except Exception as e:
+            logger.error(f"خطأ في معالجة سجل صفقات الباك تست: {e}")
+            
+    rejections = state_manager.get_rejection_counters()
+    
+    report = f"📊 <b>التقرير المقارن اليومي (Testnet vs Backtest)</b> 📊\n\n"
+    report += f"🗓️ <b>التاريخ:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+    report += f"〰️〰️〰️〰️〰️〰️〰️〰️\n\n"
+    
+    report += f"🟢 <b>أداء التداول التجريبي الحقيقي (Live Testnet):</b>\n"
+    report += f"• عدد الصفقات: <code>{testnet_trades_count}</code>\n"
+    report += f"• نسبة الفوز: <code>{testnet_win_rate:.2f}%</code>\n"
+    report += f"• معامل الربح (PF): <code>{testnet_pf:.2f}</code>\n"
+    report += f"• أقصى تراجع (Max DD): <code>{testnet_max_dd:.2f}%</code>\n"
+    report += f"• متوسط الانزلاق الفعلي: <code>{testnet_avg_slippage:.3f}%</code>\n"
+    report += f"• صافي الأرباح/الخسائر: <code>{testnet_net_return:+.2f}</code> USDT\n\n"
+    
+    report += f"🔵 <b>المرجع التاريخي المقارن (Backtest 365d):</b>\n"
+    report += f"• عدد الصفقات الكلي: <code>{bt_trades_count}</code>\n"
+    report += f"• نسبة الفوز: <code>{bt_win_rate:.2f}%</code>\n"
+    report += f"• معامل الربح (PF): <code>{bt_pf:.2f}</code>\n"
+    report += f"• أقصى تراجع (Max DD): <code>{bt_max_dd:.2f}%</code>\n"
+    report += f"• صافي العائد الكلي: <code>{bt_net_return:+.2f}</code> USDT\n\n"
+    
+    report += f"🚫 <b>إحصائيات الصفقات المرفوضة بالفلاتر:</b>\n"
+    if rejections:
+        for filter_name, count in rejections.items():
+            report += f"• فلتر <code>{filter_name}</code>: تم إلغاء <code>{count}</code> صفقات\n"
+    else:
+        report += "• لا يوجد صفقات مرفوضة اليوم.\n"
+        
+    report += f"\n💡 <i>ملاحظة: البوت يحتاج إلى 7 إلى 14 يوماً من الأداء التجريبي المستقر للتحقق من الموثوقية الكاملة.</i>"
+    
+    notifier.send_message(report)
+    state_manager.reset_rejection_counters()
+    
+    state_manager.state["last_daily_report_date"] = datetime.now().strftime("%Y-%m-%d")
+    state_manager.save_state()
+
+
+def reconcile_positions(client, state_manager):
+    """
+    التأكد من أن الصفقات المسجلة في الذاكرة تتطابق مع باينانس.
+    إذا أغلقت باينانس صفقة ولم يعلم بها البوت (بسبب انقطاع مثلاً)، سيتم مسحها من الذاكرة لتجنب التعليق.
+    """
+    try:
+        logger.info("🔄 جاري مزامنة الصفقات المفتوحة مع منصة باينانس...")
+        positions = client.exchange.fetch_positions()
+        # توحيد اسم العملة ليطابق النظام (بدون :USDT)
+        exchange_active = {p['symbol'].split(':')[0] for p in positions if float(p.get('info', {}).get('positionAmt', 0)) != 0}
+        
+        local_symbols = state_manager.get_active_symbols()  # set
+        
+        # إيجاد الصفقات الموجودة في الذاكرة لكنها غير مفتوحة على باينانس دون تعديل ال_set أثناء التكرار
+        stale = {sym for sym in local_symbols if sym not in exchange_active}
+        if stale:
+            logger.warning(f"⚠️ صفقات مغلقة على باينانس لكنها في الذاكرة — سيتم حذفها: {stale}")
+            local_symbols = local_symbols - stale
+            
+        # إيجاد الصفقات المفتوحة في باينانس لكنها غير مسجلة في ذاكرة البوت (مثلاً فتحت يدوياً أو بسبب انقطاع)
+        missing = {sym for sym in exchange_active if sym not in local_symbols}
+        if missing:
+            logger.info(f"➕ صفقات مفتوحة على باينانس غير مسجلة في البوت — سيتم إضافتها: {missing}")
+            local_symbols = local_symbols.union(missing)
+            
+        if stale or missing:
+            state_manager.save_active_symbols(local_symbols)
+            
+    except Exception as e:
+        logger.error(f"❌ فشل مزامنة الصفقات: {e}")
+
+def check_network_connection(client):
+    """
+    مراقبة حالة الشبكة (Hummingbot Network Check).
+    يتحقق من الاتصال بباينانس، وإذا فشل، يدخل البوت في وضع التعليق الآمن حتى يعود الاتصال.
+    """
+    while True:
+        try:
+            client.exchange.fetch_time()
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ [Network Monitor] فقدان الاتصال بشبكة Binance. البوت في وضع التعليق الآمن. إعادة المحاولة بعد 10 ثوانٍ...")
+            time.sleep(10)
+
+def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, state_manager, notifier, news_engine, ai_engine, ta_engine, social_engine, universe_filter, derivatives_filter, last_scan_time=None):
+    # مزامنة الصفقات للتأكد من أن الذاكرة متوافقة مع منصة باينانس (لتنظيف الصفقات المغلقة أو غير المعروفة)
+    reconcile_positions(client, state_manager)
+    
+    # تحقق من وقت التقرير اليومي المقارن
+    today_date = datetime.now().strftime("%Y-%m-%d")
+    if state_manager.state.get("last_daily_report_date") != today_date:
+        try:
+            send_daily_performance_report(client, state_manager, notifier)
+        except Exception as e:
+            logger.error(f"خطأ أثناء توليد التقرير اليومي: {e}")
+
+    active_symbols = state_manager.get_active_symbols()
+        
+    logger.info("=========================================")
+    logger.info("بدء جولة مسح السوق (Market Screener)...")
+    logger.info("=========================================")
+    
+    # [مراقب الصفقات المغلقة]
+    if last_scan_time:
+        logger.info("جاري التحقق من الصفقات المغلقة (SL/TP) خلال الاستراحة...")
+        check_symbols = set(client.get_top_volatile_symbols(limit=15))
+        check_symbols.update(active_symbols)
+        
+        for sym in check_symbols:
+            alerts = client.get_recent_sl_tp_fills(sym, last_scan_time)
+            for alert in alerts:
+                pnl_pct = 0.0
+                try:
+                    exit_details = handle_trade_close(alert, state_manager)
+                    if exit_details:
+                        pnl_pct = exit_details.get("pnl_pct", 0.0)
+                except Exception as e:
+                    logger.error(f"خطأ أثناء تسجيل إغلاق الصفقة: {e}")
+                    
+                notifier.send_pnl_alert(alert['symbol'], alert['type'], alert['price'], alert['pnl'], pnl_pct)
+                logger.info(f"إشعار إغلاق صفقة: {alert['symbol']} | {alert['type']} | PnL: {alert['pnl']} | Pct: {pnl_pct}%")
+                if alert['symbol'] in active_symbols:
+                    active_symbols.remove(alert['symbol'])
+                    state_manager.save_active_symbols(active_symbols)
+                if trailing_manager.has_trade(alert['symbol']):
+                    trailing_manager.unregister_trade(alert['symbol'])
+
+    # جلب الرصيد الإجمالي (يشمل الرصيد المتاح + الهامش المحجوز في الصفقات)
+    balance = client.get_balance()
+    usdt_free = balance.get('USDT', {}).get('free', 0) if balance else 0
+    usdt_total = balance.get('USDT', {}).get('total', 0) if balance else 0
+    
+    # [ميزة الرصيد الوهمي]: تقييد الرصيد المستخدم للمحاكاة (مثال: 50 دولار فقط بدلاً من 100 ألف)
+    # ملاحظة: هذا التقييد يعمل *فقط* في الـ Testnet (التجريبي). 
+    # بمجرد تحويل البوت للحساب الحقيقي (USE_TESTNET=False) سيتم إلغاء هذا التقييد برمجياً وسيعتمد على الرصيد الفعلي في منصة باينانس.
+    simulated_cap = getattr(Config, 'TESTNET_SIMULATED_BALANCE', 0)
+    if getattr(Config, 'USE_TESTNET', False) and simulated_cap > 0:
+        usdt_free = min(usdt_free, simulated_cap)
+        usdt_total = min(usdt_total, simulated_cap)
+        logger.info(f"الرصيد المتاح: {usdt_free:.2f} USDT | الإجمالي (Equity الوهمي المقيّد): {usdt_total:.2f} USDT")
+    else:
+        logger.info(f"الرصيد المتاح: {usdt_free:.2f} USDT | الإجمالي (Equity): {usdt_total:.2f} USDT")
+    
+    # تحديث الرصيد اليومي (المرجعي) بناءً على الرصيد الإجمالي
+    if usdt_total > 0:
+        state_manager.update_daily_balance(usdt_total)
+        
+    initial_balance = state_manager.get_initial_balance()
+    
+    if usdt_free <= 0:
+        logger.error("لا يوجد رصيد حر كافي للبدء.")
+        return usdt_free
+
+    # التحقق من حد الخسارة اليومية (Daily Loss Limit) بناءً على الرصيد الإجمالي
+    if initial_balance and initial_balance > 0:
+        drawdown = ((initial_balance - usdt_total) / initial_balance) * 100
+        if drawdown >= Config.DAILY_LOSS_LIMIT_PERCENT:
+            msg = f"🛑 إيقاف طارئ (Kill Switch): الخسارة وصلت إلى {drawdown:.2f}% وتجاوزت الحد المسموح ({Config.DAILY_LOSS_LIMIT_PERCENT}%). سيتم إيقاف البوت لحماية المتبقي من رأس المال."
+            logger.critical(msg)
+            notifier.send_message(f"🚨 <b>{msg}</b>")
+            raise SystemExit(msg) # إيقاف البرنامج بالكامل
+
+    # التحقق من الحد الأقصى للصفقات المفتوحة
+    max_trades = getattr(Config, 'TESTNET_MAX_OPEN_TRADES', Config.MAX_OPEN_TRADES) if getattr(Config, 'USE_TESTNET', False) else Config.MAX_OPEN_TRADES
+    if len(active_symbols) >= max_trades:
+        logger.warning(f"وصلنا للحد الأقصى للصفقات المفتوحة ({max_trades}). سنتوقف عن البحث حتى تُغلق صفقة.")
+        return usdt_total
+
+    # 2. مسح السوق - استخدام فلتر أمان الكتالوج (Universe Filter) لجلب أفضل العملات المشتعلة المؤهلة
+    target_symbols = universe_filter.get_scanning_targets(limit=10)
+    logger.info(f"العملات التي سيتم مراقبتها الآن: {', '.join(target_symbols)}")
+    
+    scan_results  = []
+    trade_executed = False
+    
+    # 3. دورة البحث عن الصفقات
+    for symbol in target_symbols:
+        coin_name = symbol.split('/')[0]
+        logger.info(f"\n--- فحص الزوج: {symbol} ---")
+        
+        # [تطبيق PairLocks] - تجاوز العملة إذا كانت محظورة بسبب الخسائر
+        if state_manager.is_pair_locked(symbol):
+            lock_info = state_manager.get_pair_lock_info(symbol)
+            logger.warning(f"[{symbol}] 🔒 العملة محظورة مؤقتاً بسبب: {lock_info.get('reason', 'غير محدد')}. سيتم تجاوزها.")
+            continue
+        
+        # تصنيف العملة وقواعد حماية Meme/New
+        coin_type, classification_reason = universe_filter.classify_symbol(symbol)
+        logger.info(f"[{symbol}] تصنيف العملة: {coin_type.upper()} ({classification_reason})")
+        
+        # إعدادات الرافعة والمخاطرة المخصصة
+        trade_leverage = Config.LEVERAGE
+        trade_risk_pct = Config.RISK_PER_TRADE_PERCENT / 100.0
+        
+        if coin_type in ['meme', 'new']:
+            trade_leverage = getattr(Config, 'MEME_LEVERAGE', 3)
+            trade_risk_pct = getattr(Config, 'MEME_RISK_PER_TRADE_PERCENT', 0.25) / 100.0
+            logger.info(f"[{symbol}] تطبيق إعدادات حماية الميم/الجديد: رافعة {trade_leverage}x | مخاطرة {trade_risk_pct*100:.2f}%")
+            
+        # تطبيق مضاعف مخاطرة Testnet إن وجد
+        if getattr(Config, 'USE_TESTNET', False) and hasattr(Config, 'TESTNET_RISK_MULTIPLIER'):
+            trade_risk_pct = trade_risk_pct * getattr(Config, 'TESTNET_RISK_MULTIPLIER', 1.0)
+            logger.info(f"[{symbol}] تطبيق مضاعف مخاطرة التست نت: {getattr(Config, 'TESTNET_RISK_MULTIPLIER')}x -> مخاطرة مخفضة {trade_risk_pct*100:.3f}%")
+
+        # أ) التحليل الفني الأساسي (15 دقيقة) - نطلب 250 لضمان وجود بيانات تكفي لـ EMA 200
+        bars_df = client.fetch_ohlcv(symbol, timeframe='15m', limit=250)
+        if bars_df is None or bars_df.empty:
+            scan_results.append({'coin': coin_name, 'decision': '⚪ SKIP', 'reason': 'فشل جلب البيانات 15m', 'price': 0, 'rsi': 0, 'macd': 0, 'bb_low': 0, 'bb_high': 0})
+            continue
+            
+        bars_df  = ta_engine.add_indicators(bars_df)
+        ta_details = {}
+        ta_trend = ta_engine.evaluate_trend(bars_df, symbol=symbol, details=ta_details)
+        
+        # [تحديث المحترفين]: Multi-Timeframe Confirmation (تأكيد الاتجاه العام من فريم 1 ساعة)
+        bars_1h = client.fetch_ohlcv(symbol, timeframe='1h', limit=250)
+        trend_1h = 'neutral'
+        if bars_1h is not None and not bars_1h.empty:
+            bars_1h = ta_engine.add_indicators(bars_1h)
+            trend_1h = ta_engine.evaluate_trend(bars_1h, symbol=symbol)
+            logger.info(f"[{symbol}] اتجاه فريم 1 ساعة (1H Trend): {trend_1h}")
+            
+            # فلترة فورية: لا تدخل شراء إذا كان الاتجاه العام هابط، ولا بيع إذا كان صاعد
+            if ta_trend == 'buy' and trend_1h == 'sell':
+                logger.warning(f"[{symbol}] ❌ تم رفض الشراء: الإشارة على 15m صاعدة لكن فريم 1H هابط (مصيدة ثيران).")
+                state_manager.increment_rejection_counter("Multi-Timeframe")
+                scan_results.append({'coin': coin_name, 'decision': '🔴 REJECT', 'reason': 'فريم 1H هابط (Multi-Timeframe)', 'price': bars_df.iloc[-1].get('close',0), 'rsi': bars_df.iloc[-1].get('rsi',0)})
+                
+                # طباعة التقرير التفصيلي اللوجي
+                ema_200 = ta_details.get('ema_200', 0)
+                close_price = ta_details.get('close', 0)
+                ema_trend = 'neutral'
+                if ema_200 > 0:
+                    ema_trend = 'bullish' if close_price > ema_200 else 'bearish'
+                logger.info(f"📊 [ملخص فحص {symbol}] | النقاط: {ta_details.get('score', 0)} | ADX: {ta_details.get('adx', 0):.1f} | EMA200 ترند: {ema_trend} | فريم 1H ترند: {trend_1h} | القرار النهائي: REJECT | السبب: فريم 1H هابط (Multi-Timeframe)")
+                
+                continue
+            elif ta_trend == 'sell' and trend_1h == 'buy':
+                logger.warning(f"[{symbol}] ❌ تم رفض البيع: الإشارة على 15m هابطة لكن فريم 1H صاعد (مصيدة دببة).")
+                state_manager.increment_rejection_counter("Multi-Timeframe")
+                scan_results.append({'coin': coin_name, 'decision': '🔴 REJECT', 'reason': 'فريم 1H صاعد (Multi-Timeframe)', 'price': bars_df.iloc[-1].get('close',0), 'rsi': bars_df.iloc[-1].get('rsi',0)})
+                
+                # طباعة التقرير التفصيلي اللوجي
+                ema_200 = ta_details.get('ema_200', 0)
+                close_price = ta_details.get('close', 0)
+                ema_trend = 'neutral'
+                if ema_200 > 0:
+                    ema_trend = 'bullish' if close_price > ema_200 else 'bearish'
+                logger.info(f"📊 [ملخص فحص {symbol}] | النقاط: {ta_details.get('score', 0)} | ADX: {ta_details.get('adx', 0):.1f} | EMA200 ترند: {ema_trend} | فريم 1H ترند: {trend_1h} | القرار النهائي: REJECT | السبب: فريم 1H صاعد (Multi-Timeframe)")
+                
+                continue
+
+        latest = bars_df.iloc[-1]
+        coin_data = {
+            'coin': coin_name,
+            'price':    latest.get('close', 0),
+            'open':     latest.get('open', 0),
+            'rsi':      latest.get('rsi', 0),
+            'macd':     latest.get('macd', 0),
+            'ema_50':   latest.get('ema_50', 0),
+            'bb_low':   latest.get('bb_low', 0),
+            'bb_high':  latest.get('bb_high', 0),
+            'support':  latest.get('support', 0),
+            'resistance': latest.get('resistance', 0),
+            'market_levels': ta_details.get('market_levels', {})
+        }
+        
+        # ب) تحليل المشاعر عبر نظام هجين (LunarCrush أولاً، ثم NewsAPI+Groq)
+        sentiment = None
+        
+        # المرحلة 1: LunarCrush (الأسرع والأكثر تخصصاً للكريبتو)
+        logger.info(f"[{symbol}] جاري سؤال LunarCrush عن مشاعر {coin_name}...")
+        sentiment = social_engine.get_social_sentiment(coin_name)
+        time.sleep(1.5)  # Rate Limiting: منع خطأ 429 من LunarCrush
+        
+        if sentiment:
+            logger.info(f"[LunarCrush] {coin_name}: {sentiment['label'].upper()} | Galaxy={sentiment['galaxy_score']} | Raw={sentiment['raw_sentiment_pct']}%")
+        else:
+            # المرحلة 2: NewsAPI + Groq (الاحتياطي للعملات غير الموجودة في LunarCrush)
+            logger.info(f"[{symbol}] لا توجد بيانات LunarCrush - جاري الاحتياط بـ NewsAPI+Groq...")
+            news = news_engine.fetch_news_for_coin(coin_name, page_size=2)
+            if news and news[0].get('title'):
+                title = news[0]['title']
+                description = news[0].get('description', '')
+                full_text = f"{title}. {description}"
+                logger.info(f"أحدث خبر عن {coin_name}: {title}")
+                sentiment = ai_engine.analyze_sentiment(full_text)
+                if sentiment:
+                    logger.info(f"[Groq/Llama] {coin_name}: {sentiment['label'].upper()} (ثقة: {sentiment['score']:.2f})")
+            else:
+                logger.warning(f"لا توجد أخبار حديثة عن {coin_name}.")
+        
+        # ج) القرار النهائي (الاستراتيجية الهجينة)
+        # نمرر coin_data ليقوم المحرك بمنع الدخول الأعمى إذا كانت المؤشرات سيئة جداً
+        decision_obj = hybrid_strategy.decide(ta_trend, sentiment, ta_data=coin_data)
+        final_decision = decision_obj.get("action", "hold")
+        hybrid_reason = decision_obj.get("reason", "انتظار إشارة فنية")
+        risk_multiplier = decision_obj.get("risk_multiplier", 1.0)
+        
+        # تطبيق مضاعف المخاطرة الخاص بالذكاء الاصطناعي (Risk Reducer)
+        if risk_multiplier < 1.0:
+            trade_risk_pct = trade_risk_pct * risk_multiplier
+            logger.info(f"[{symbol}] تم خفض المخاطرة بنسبة { (1 - risk_multiplier) * 100 }% بناءً على قرار الذكاء الاصطناعي.")
+            
+        logger.info(f"[{symbol}] القرار المدمج النهائي: {final_decision.upper()} | السبب: {hybrid_reason}")
+        
+        # طباعة التقرير التفصيلي اللوجي
+        ema_200 = ta_details.get('ema_200', 0)
+        close_price = ta_details.get('close', 0)
+        ema_trend = 'neutral'
+        if ema_200 > 0:
+            ema_trend = 'bullish' if close_price > ema_200 else 'bearish'
+            
+        rejection_reason = hybrid_reason
+        if final_decision == 'hold' and ta_trend in ['buy', 'sell']:
+            sentiment_lbl = sentiment.get('label', 'neutral') if sentiment else 'neutral'
+            rejection_reason = f"{hybrid_reason} (TA={ta_trend.upper()}, Sentiment={sentiment_lbl.upper()})"
+            
+        if getattr(Config, 'TESTNET_DEBUG_MODE', False):
+            sentiment_lbl = sentiment.get('label', 'neutral') if sentiment else 'neutral'
+            logger.info(f"--- [DECISION PIPELINE DEBUG : {symbol}] ---")
+            logger.info(f"TA raw signal: {ta_trend.upper()}")
+            logger.info(f"Score: {ta_details.get('score', 0)}")
+            logger.info(f"ADX: {ta_details.get('adx', 0):.1f}")
+            logger.info(f"EMA200 trend: {ema_trend}")
+            logger.info(f"1H trend: {trend_1h}")
+            logger.info(f"Sentiment: {sentiment_lbl.upper()}")
+            logger.info(f"Derivatives mode: {Config.DERIVATIVES_FILTER_MODE}")
+            logger.info(f"Initial Hybrid Decision: {final_decision.upper()}")
+            logger.info(f"Rejection Reason (so far): {rejection_reason}")
+            logger.info(f"--------------------------------------------")
+        else:
+            logger.info(f"📊 [ملخص فحص {symbol}] | النقاط: {ta_details.get('score', 0)} | ADX: {ta_details.get('adx', 0):.1f} | EMA200 ترند: {ema_trend} | فريم 1H ترند: {trend_1h} | القرار النهائي: {final_decision.upper()} | السبب: {rejection_reason}")
+
+        
+        if final_decision in ['buy', 'sell']:
+            # [تدقيق المشتقات - كوين جلاس]: فحص مخاطر المشتقات وتسجيلها للمراقبة/المنع
+            if Config.DERIVATIVES_FILTER_MODE != "off":
+                deriv_result = derivatives_filter.evaluate_risk(symbol, final_decision, coin_data['price'])
+                derivatives_filter.log_audit_result(symbol, final_decision, coin_data['price'], deriv_result)
+                
+                # إذا تم اقتراح المنع وكان وضع التفعيل نشطاً
+                if Config.DERIVATIVES_FILTER_MODE == "enforce" and deriv_result['decision'] == "BLOCK_SUGGESTED":
+                    logger.warning(f"[{symbol}] ❌ تم منع الصفقة بواسطة فلتر المشتقات (CoinGlass): {deriv_result['reason']}")
+                    state_manager.increment_rejection_counter("Derivatives (CoinGlass)")
+                    coin_data['decision'] = '🔴 REJECT'
+                    coin_data['reason'] = f"حظر كوين جلاس: {deriv_result['reason']}"
+                    scan_results.append(coin_data)
+                    continue
+                    
+            # [تحديث المحترفين]: الحماية من الدخول المتكرر (Over-trading)
+            if client.has_open_position(symbol):
+                logger.warning(f"[{symbol}] ❌ تم إلغاء الصفقة: لديك صفقة مفتوحة مسبقاً على هذه العملة!")
+                coin_data['decision'] = '🟡 SKIP'
+                coin_data['reason'] = "صفقة مفتوحة مسبقاً"
+                scan_results.append(coin_data)
+                continue
+                
+            # جلب تفاصيل التغير السعري في 24 ساعة لتفادي الشراء في القمة لعملات الميم/الجديدة
+            ticker = None
+            try:
+                ticker = client.exchange.fetch_ticker(symbol)
+            except Exception as e:
+                logger.warning(f"تعذر جلب بيانات Ticker للزوج {symbol}: {e}")
+                
+            change_24h = ticker.get('percentage', 0) if ticker else 0
+            logger.info(f"[{symbol}] نسبة تغير السعر في 24 ساعة: {change_24h:+.2f}%")
+            
+            # حماية الشراء في القمم (Anti-Pump Filter) للعملات عالية الخطورة
+            if coin_type in ['meme', 'new'] and change_24h > 15.0 and final_decision == 'buy':
+                logger.warning(f"[{symbol}] ❌ تم رفض الشراء: العملة ميم/جديدة وهي في حالة صعود حاد (Pump > 15%). السعر الحالي قد يكون قمة.")
+                state_manager.increment_rejection_counter("Anti-Pump")
+                coin_data['decision'] = '🔴 REJECT'
+                coin_data['reason'] = f"تجنب شراء قمة (صعود 24h: {change_24h:.1f}%)"
+                scan_results.append(coin_data)
+                continue
+
+            current_price = client.get_current_price(symbol)
+            if current_price:
+                optimal_entry = ta_details.get('optimal_entry', current_price)
+                invalidation_level = ta_details.get('invalidation_level', current_price)
+                
+                atr_val = float(bars_df.iloc[-2].get('atr', 0)) if len(bars_df) > 1 else 0.0
+                
+                # حساب الستوب الفعلي لتقدير حجم المخاطرة بدقة
+                temp_sl, _ = risk_manager.calculate_sl_tp(final_decision, optimal_entry, atr=atr_val, invalidation_level=invalidation_level, market_levels=coin_data.get('market_levels'))
+                amount = risk_manager.calculate_position_size(usdt_free, optimal_entry, custom_risk_percent=trade_risk_pct, atr=atr_val, sl=temp_sl)
+                
+                margin_required = (amount * optimal_entry) / trade_leverage
+                if margin_required > usdt_free * 0.95:
+                    logger.warning(f"[{symbol}] الهامش المطلوب أكبر من الرصيد الحر. تخطي الصفقة.")
+                    state_manager.increment_rejection_counter("Margin")
+                    continue
+                
+                distance = abs(current_price - optimal_entry) / optimal_entry
+                if distance > 0.002: # أكثر من 0.2% انعكاس مطلوب لتفعيل الأمر المعلق
+                    if symbol not in state_manager.get_virtual_orders():
+                        logger.info(f"🎯 [Sniper] السعر {current_price:.4f} يقترب من Order Block {optimal_entry:.4f}. إرسال تنبيه وحفظ أمر معلق...")
+                        notifier.send_message(f"⚠️ <b>تنبيه تحضيري (Pre-Signal):</b>\nالزوج <code>{symbol}</code> يقترب من منطقة مؤسسية (Order Block) عند سعر <code>{optimal_entry:.4f}</code>.\n(جاري المراقبة لانتظار إغلاق الشمعة وتأكيد السيولة...)")
+                        virtual_order = {
+                            "side": final_decision,
+                            "optimal_entry": float(optimal_entry),
+                            "invalidation_level": float(invalidation_level),
+                            "ob_mid": float(coin_data.get('ob_mid', optimal_entry)),
+                            "amount": float(amount),
+                            "atr": float(atr_val),
+                            "support": float(coin_data.get('support', 0)),
+                            "resistance": float(coin_data.get('resistance', 0)),
+                            "trade_leverage": int(trade_leverage),
+                            "trade_risk_pct": float(trade_risk_pct),
+                            "created_at": datetime.now().timestamp(),
+                            "sentiment_label": sentiment.get('label', 'neutral') if sentiment else 'neutral',
+                            "sentiment_score": float(sentiment.get('score') or sentiment.get('galaxy_score') or 0.0) if sentiment else 0.0,
+                            "ta_trend": ta_trend,
+                            "market_levels": coin_data.get('market_levels', {})
+                        }
+                        state_manager.save_virtual_order(symbol, virtual_order)
+                    scan_results.append({'coin': coin_name, 'decision': '⏳ V-LIMIT', 'reason': f"أمر معلق عند {optimal_entry:.4f}", 'price': current_price})
+                    continue
+                else:
+                    # السعر مثالي الآن، ننفذ الصفقة
+                    trade_executed = execute_and_protect_trade(
+                        symbol, final_decision, amount, current_price, trade_leverage, trade_risk_pct, atr_val, 
+                        coin_data, sentiment, bars_df, ticker, ta_trend, client, risk_manager, trailing_manager, 
+                        state_manager, notifier, active_symbols, scan_results, invalidation_level
+                    )
+                    
+                    if trade_executed and len(active_symbols) >= max_trades:
+                        logger.info("تم الوصول للحد الأقصى للصفقات المتزامنة. إيقاف المسح الحالي.")
+                        break
+                    elif not trade_executed:
+                        logger.warning(f"[{symbol}] فشل تنفيذ الصفقة عبر المنصة. لم يتم إضافتها للمراقبة.")
+                        coin_data['decision'] = '🔴 FAILED'
+                        coin_data['reason'] = f"فشل فتح الصفقة على المنصة (حجم صغير أو خطأ)"
+                        scan_results.append(coin_data)
+                        
+            else:
+                logger.warning(f"تعذر الحصول على السعر الحالي للزوج {symbol}")
+                scan_results.append({'coin': coin_name, 'decision': '🔴 REJECT', 'reason': 'فشل الحصول على السعر', 'price': 0})
+                    
+        else:
+            coin_data['decision'] = '🟡 HOLD'
+            if sentiment and sentiment.get('source') == 'lunarcrush':
+                coin_data['reason'] = f"فني:{ta_trend} | 🌙 Galaxy={sentiment.get('galaxy_score')} | Sentiment={sentiment.get('raw_sentiment_pct')}%"
+            elif sentiment:
+                coin_data['reason'] = f"فني:{ta_trend} | أخبار:{sentiment.get('label','?')}"
+            else:
+                coin_data['reason'] = f"فني:{ta_trend} | لا بيانات اجتماعية"
+            scan_results.append(coin_data)
+                
+    logger.info("=========================================")
+    logger.info("تم إنهاء جولة مسح السوق.")
+    
+    # --- إرسال الملخص التفصيلي إلى تيليجرام ---
+    summary = f"📊 <b>تقرير مسح السوق</b> 📊\n\n"
+    summary += f"💰 <b>الرصيد الإجمالي:</b> <code>{usdt_total:.2f}</code> USDT\n"
+    summary += f"💵 <b>الرصيد المتاح:</b> <code>{usdt_free:.2f}</code> USDT\n"
+    summary += f"🔍 <b>المسح:</b> <code>{len(scan_results)}</code> عملات\n"
+    summary += "〰️〰️〰️〰️〰️〰️〰️〰️\n\n"
+    
+    for r in scan_results:
+        price  = r.get('price', 0)
+        rsi    = r.get('rsi', 0)
+        
+        if rsi > 70:    rsi_status = "🔥 تشبع شرائي"
+        elif rsi < 30:  rsi_status = "🧊 تشبع بيعي"
+        else:           rsi_status = "⚖️ محايد"
+        
+        summary += f"{r['decision']} | <code>{r['coin']}</code>\n"
+        summary += f"💲 السعر: <code>{price:.4f}</code>\n"
+        summary += f"📈 RSI: <code>{rsi:.1f}</code> ({rsi_status})\n"
+        summary += f"📝 {r.get('reason', '')}\n\n"
+    
+    summary += "〰️〰️〰️〰️〰️〰️〰️〰️\n"
+    if not trade_executed:
+        summary += "⏳ <b>النتيجة:</b> لا توجد فرص قوية حالياً. (انتظار الدورة القادمة)"
+    else:
+        summary += "✅ <b>النتيجة:</b> تم قنص فرصة وتنفيذ صفقة بنجاح!"
+        
+    notifier.send_message(summary)
+    return usdt_total
+
+def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, risk_manager):
+    """
+    مراقبة الأوامر الافتراضية المعلقة (Virtual Pending Orders).
+    تستخدم مفاهيم التداول المؤسسي: انتظار إغلاق الشمعة (Candle Close)
+    وتأكيد حجم التداول (Volume Confirmation) قبل التنفيذ.
+    """
+    virtual_orders = state_manager.get_virtual_orders()
+    if not virtual_orders:
+        return
+        
+    active_symbols = state_manager.get_active_symbols()
+    
+    for symbol, v_order in list(virtual_orders.items()):
+        if symbol in active_symbols:
+            state_manager.remove_virtual_order(symbol)
+            continue
+            
+        created_at = v_order.get("created_at", 0)
+        # الأمر المعلق يظل صالحاً لمدة 4 ساعات
+        if datetime.now().timestamp() - created_at > 4 * 3600:
+            logger.info(f"⏳ [Sniper] إلغاء الأمر المعلق لـ {symbol} لانتهاء مدة الصلاحية (4 ساعات).")
+            state_manager.remove_virtual_order(symbol)
+            continue
+            
+        current_price = client.get_current_price(symbol)
+        if not current_price:
+            continue
+            
+        optimal_entry = v_order.get('optimal_entry')
+        side = v_order.get('side')
+        
+        # المرحلة الأولى: هل السعر وصل للمنطقة؟
+        price_ready = False
+        if side == 'buy' and current_price <= optimal_entry * 1.002:
+            price_ready = True
+        elif side == 'sell' and current_price >= optimal_entry * 0.998:
+            price_ready = True
+            
+        if price_ready:
+            logger.info(f"🎯 [Sniper ALERT] السعر داخل منطقة الـ Order Block لـ {symbol}! جاري فحص تأكيد الإغلاق والسيولة (Multi-Confirmation)...")
+            
+            try:
+                # نجلب الشموع للتأكد
+                bars_df = client.fetch_ohlcv(symbol, timeframe='15m', limit=25)
+                if bars_df is None or len(bars_df) < 20:
+                    continue
+                    
+                # نستخدم الشمعة المغلقة لضمان التأكيد
+                closed_candle = bars_df.iloc[-2]
+                
+                # حساب متوسط السيولة للشموع السابقة (نستبعد الشمعة الحالية)
+                current_volume = closed_candle['volume']
+                avg_volume = bars_df['volume'].iloc[-22:-2].mean()
+                
+                # حساب أبعاد الشمعة لتحديد قوة الرفض (Rejection)
+                body = abs(closed_candle['close'] - closed_candle['open'])
+                lower_wick = min(closed_candle['open'], closed_candle['close']) - closed_candle['low']
+                upper_wick = closed_candle['high'] - max(closed_candle['open'], closed_candle['close'])
+                
+                ob_mid = v_order.get('ob_mid', optimal_entry)
+                
+                # فلتر 1: إغلاق الشمعة في الاتجاه الصحيح مع ذيل ارتدادي قوي (Wick Rejection)
+                is_closed_correctly = False
+                if side == 'buy':
+                    is_closed_correctly = (
+                        closed_candle['close'] > closed_candle['open'] and
+                        lower_wick > body * 1.0 and
+                        closed_candle['close'] > ob_mid
+                    )
+                elif side == 'sell':
+                    is_closed_correctly = (
+                        closed_candle['close'] < closed_candle['open'] and
+                        upper_wick > body * 1.0 and
+                        closed_candle['close'] < ob_mid
+                    )
+                    
+                # فلتر 2: سيولة قوية تدل على تدخل المال الذكي (اختراق المتوسط بـ 20%)
+                is_volume_confirmed = current_volume > (avg_volume * 1.2)
+                
+                if is_closed_correctly and is_volume_confirmed:
+                    logger.info(f"✅ [Sniper CONFIRMED] تم تأكيد الدخول للزوج {symbol} (شمعة مغلقة ارتدادية + فوليوم عالي). التنفيذ فوراً...")
+                    notifier.send_message(f"✅ <b>إشارة دخول مؤكدة (Confirmed Signal):</b>\nالزوج <code>{symbol}</code> أثبت ارتداده من الـ Order Block بحجم تداول عالي.\nجاري التنفيذ...")
+                    
+                    # إعادة حساب الحجم بدقة بناءً على السعر اللحظي ومستوى الستوب
+                    usdt_free = client.get_balance().get('USDT', {}).get('free', 0)
+                    temp_sl, _ = risk_manager.calculate_sl_tp(side, current_price, atr=v_order['atr'], invalidation_level=v_order.get('invalidation_level', current_price), market_levels=v_order.get('market_levels'))
+                    new_amount = risk_manager.calculate_position_size(usdt_free, current_price, custom_risk_percent=v_order['trade_risk_pct'], atr=v_order['atr'], sl=temp_sl)
+                    
+                    if new_amount <= 0:
+                        logger.warning(f"⚠️ الرصيد الحر لا يكفي لفتح الصفقة {symbol}")
+                        state_manager.remove_virtual_order(symbol)
+                        continue
+
+                    # التنفيذ المباشر
+                    execute_and_protect_trade(
+                        symbol=symbol,
+                        final_decision=side,
+                        amount=new_amount,
+                        current_price=current_price,
+                        trade_leverage=v_order['trade_leverage'],
+                        trade_risk_pct=v_order['trade_risk_pct'],
+                        atr_val=v_order['atr'],
+                        coin_data={'support': v_order['support'], 'resistance': v_order['resistance'], 'price': current_price, 'reason': 'SMC Multi-Confirmed', 'market_levels': v_order.get('market_levels', {})},
+                        sentiment={'label': v_order['sentiment_label'], 'score': v_order['sentiment_score']},
+                        bars_df=bars_df,
+                        ticker=client.exchange.fetch_ticker(symbol),
+                        ta_trend=v_order['ta_trend'],
+                        client=client,
+                        risk_manager=risk_manager,
+                        trailing_manager=trailing_manager,
+                        state_manager=state_manager,
+                        notifier=notifier,
+                        active_symbols=active_symbols,
+                        scan_results=[],
+                        invalidation_level=v_order.get('invalidation_level')
+                    )
+                    state_manager.remove_virtual_order(symbol)
+                else:
+                    logger.info(f"⏳ [Sniper WAITING] السعر داخل المنطقة لكن لم تتوفر شروط الإغلاق والحجم للزوج {symbol}. نتجنب الفخ (Fakeout).")
+                    
+            except Exception as e:
+                logger.error(f"❌ فشل تحويل الأمر المعلق إلى صفقة حقيقية للزوج {symbol}: {e}")
+
+def monitor_active_trades(client, state_manager, trailing_manager, alert_manager, notifier, last_check_time):
+    """
+    مراقبة الصفقات المفتوحة في الخلفية للتحقق مما إذا كانت قد أغلقت، تحديث التريلينغ، وتنبيهات الاقتراب.
+    """
+    active_symbols = state_manager.get_active_symbols()
+    if not active_symbols:
+        return int(time.time() * 1000)
+        
+    try:
+        # 1. جلب كميات الصفقات الحقيقية من المنصة مباشرة
+        positions = client.exchange.fetch_positions() # لا نمرر الرموز لتفادي خطأ CCXT في الفلترة
+        live_amts = {}
+        for pos in positions:
+            sym = pos.get('symbol', '').split(':')[0] # تحويل BTC/USDT:USDT إلى BTC/USDT ليتطابق مع النظام
+            amt = float(pos.get('info', {}).get('positionAmt', 0))
+            if amt != 0:
+                live_amts[sym] = abs(amt)
+            
+        current_time = int(time.time() * 1000)
+        
+        for sym in list(active_symbols):
+            # 2. تحديث الستوب المتحرك والتنفيذ بالقوة (Active Execution)
+            if live_amts.get(sym, 0) > 0:
+                current_price = client.get_current_price(sym)
+                if current_price:
+                    # أ) تحديث الستوب المتحرك
+                    if trailing_manager.has_trade(sym):
+                        new_sl = trailing_manager.update(sym, current_price, client)
+                        if new_sl:
+                            logger.info(f"تم تفعيل الستوب المتحرك للزوج {sym} عند السعر {new_sl}")
+
+                    # ب) التحقق من إشعارات الاقتراب
+                    meta = state_manager.state.get("entry_metadata", {}).get(sym)
+                    if meta:
+                        trade_info = {
+                            "trade_id": f"{sym}_active",
+                            "side": meta.get("side", ""),
+                            "entry_price": meta.get("entry_price", 0),
+                            "initial_stop_loss": meta.get("sl", 0),
+                            "stop_loss": trailing_manager.get_current_sl(sym) or meta.get("sl"),
+                            "take_profit": meta.get("tp", 0)
+                        }
+                        atr = meta.get("atr", 0)
+                        if atr > 0:
+                            alert_manager.check_alerts(sym, trade_info, current_price, atr)
+
+                    # ب) التنفيذ بالقوة (Virtual TP/SL)
+                    meta = state_manager.state.get("entry_metadata", {}).get(sym)
+                    if meta:
+                        side = meta.get("side", "").upper()
+                        # نستخدم الستوب الحالي (سواء الأساسي أو المتحرك)
+                        current_sl = trailing_manager.get_current_sl(sym) or meta.get("sl")
+                        tp = meta.get("tp")
+                        amt = meta.get("amount", live_amts[sym])
+                        
+                        force_close_reason = None
+                        if side in ["BUY", "LONG"] and current_sl and tp:
+                            if current_price >= tp:
+                                force_close_reason = "الهدف (TP)"
+                            elif current_price <= current_sl:
+                                force_close_reason = "وقف الخسارة (SL)"
+                                
+                        elif side in ["SELL", "SHORT"] and current_sl and tp:
+                            if current_price <= tp:
+                                force_close_reason = "الهدف (TP)"
+                            elif current_price >= current_sl:
+                                force_close_reason = "وقف الخسارة (SL)"
+                                
+                        if force_close_reason:
+                            logger.critical(f"🚀 [Active Execution] السعر اللحظي ({current_price}) لمس {force_close_reason} لصفقة {sym}! جاري الإغلاق الفوري بالقوة...")
+                            # إغلاق الصفقة بسعر السوق فوراً
+                            success = client.close_position(sym, side.lower(), amt)
+                            if success:
+                                live_amts[sym] = 0 # نجعله صفر لكي يقوم الكود بالأسفل بمعالجته كصفقة مغلقة ويرسل الإشعار فوراً!
+                                # ننتظر ثانية واحدة للسماح لباينانس بتسجيل الطلب في سجل الإغلاقات
+                                time.sleep(1.5)
+
+            # 3. التحقق مما إذا كانت الصفقة قد أغلقت (سواء من باينانس أو بتدخلنا القسري أعلاه)
+            if live_amts.get(sym, 0) == 0:
+                logger.info(f"⚡ تم رصد إغلاق الصفقة للزوج {sym} لحظياً! جاري جلب تفاصيل الربح/الخسارة...")
+                # تأخير بسيط لضمان تحديث سجل التداولات في باينانس
+                time.sleep(2.0)
+                alerts = client.get_recent_sl_tp_fills(sym, since_ms=None) # لا نعتمد على الوقت هنا لضمان عدم ضياع الإشعار
+                
+                if alerts:
+                    # نأخذ آخر أمر إغلاق
+                    alert = alerts[-1]
+                else:
+                    # في حال تأخر الـ API في تحديث السجل، نقوم بحساب الربح والخسارة يدوياً!
+                    logger.warning(f"تم إغلاق {sym} ولكن لم يتم العثور على أمر الإغلاق في السجل. سيتم توليد إشعار احتياطي...")
+                    meta = state_manager.state.get("entry_metadata", {}).get(sym, {})
+                    entry_price = float(meta.get("entry_price", 0))
+                    amount = float(meta.get("amount", 0))
+                    side = meta.get("side", "BUY")
+                    
+                    pnl = 0.0
+                    if entry_price > 0 and amount > 0 and current_price:
+                        if side.upper() in ["BUY", "LONG"]:
+                            pnl = (current_price - entry_price) * amount
+                        else:
+                            pnl = (entry_price - current_price) * amount
+                            
+                    order_type = "TAKE_PROFIT" if pnl > 0 else "STOP_LOSS"
+                    alert = {
+                        'symbol': sym,
+                        'type': order_type,
+                        'price': current_price if current_price else entry_price,
+                        'pnl': pnl
+                    }
+
+                notifier.send_pnl_alert(alert['symbol'], alert['type'], alert['price'], alert['pnl'], alert.get('pnl_pct', 0.0))
+                logger.info(f"إشعار فوري: إغلاق {alert['symbol']} | PnL: {alert['pnl']}")
+                try:
+                    handle_trade_close(alert, state_manager)
+                except Exception as e:
+                    logger.error(f"خطأ أثناء تسجيل إغلاق الصفقة في مراقب الخلفية: {e}")
+                    
+                # تنظيف الذاكرة
+                if sym in active_symbols:
+                    active_symbols.remove(sym)
+                    state_manager.save_active_symbols(active_symbols)
+                if trailing_manager.has_trade(sym):
+                    trailing_manager.unregister_trade(sym)
+
+        return current_time
+    except Exception as e:
+        logger.error(f"خطأ في مراقبة الصفقات النشطة لحظياً: {e}")
+        return last_check_time
+
+def main():
+    logger.info("=========================================")
+    logger.info("🤖 بدء التشغيل الآلي المستمر (Autonomous Loop) 🤖")
+    logger.info("سيعمل البوت 24/7 ويقوم بالمسح كل 15 دقيقة.")
+    logger.info("=========================================")
+    
+    last_scan_time = None
+    
+    notifier       = TelegramNotifier()
+    
+    # [فحوصات الأمان المبدئية - Startup Safety Checks]
+    try:
+        if not Config.USE_TESTNET and os.getenv("LIVE_TRADING_CONFIRMATION") != "I_ACCEPT_REAL_MONEY_RISK":
+            raise RuntimeError("Live trading blocked: LIVE_TRADING_CONFIRMATION is missing or incorrect.")
+            
+        state_file_path = os.getenv("STATE_FILE", "bot_state.json")
+        dir_path = os.path.dirname(os.path.abspath(state_file_path)) or "."
+        if not os.access(dir_path, os.W_OK):
+            raise RuntimeError(f"Volume path not writable: {dir_path}")
+    except Exception as e:
+        logger.critical(f"🛑 Startup Safety Check Failed: {e}")
+        notifier.send_message(f"🛑 <b>فشل في فحص بيئة التشغيل:</b>\n{e}\nتم إيقاف البوت لحماية النظام.")
+        raise
+        
+    client         = ExchangeClient()
+    hybrid_strategy= HybridStrategy()
+    risk_manager   = RiskManager()
+    state_manager  = StateManager()
+    trailing_manager = TrailingStopManager(state_manager=state_manager)
+    alert_manager = TradeApproachAlertManager(state_manager=state_manager, notifier=notifier)
+    news_engine    = NewsEngine()
+    ai_engine      = AIEngine()
+    ta_engine      = TAEngine()
+    social_engine  = SocialEngine()
+    universe_filter = UniverseFilter(client)
+    derivatives_filter = DerivativesRiskFilter()
+    
+    # تشغيل نظام الاستماع لأوامر التيليجرام في الخلفية
+    notifier.start_polling(client, state_manager, ai_engine, ta_engine, news_engine, social_engine)
+    
+    logger.info("🔄 جاري مزامنة الصفقات المفتوحة مع منصة باينانس...")
+    try:
+        live_positions = client.exchange.fetch_positions()
+        live_symbols = set()
+        for pos in live_positions:
+            amt = float(pos.get('info', {}).get('positionAmt', 0))
+            if amt != 0:
+                sym = pos['symbol'].split(':')[0]
+                live_symbols.add(sym)
+        
+        # دمج الصفقات الحية من المنصة مع الحالة المحفوظة
+        saved_symbols = state_manager.get_active_symbols()
+        all_active = saved_symbols.union(live_symbols)
+        
+        # تنظيف الصفقات المحفوظة التي تم إغلاقها يدوياً أو انتهت
+        for sym in list(all_active):
+            if sym not in live_symbols:
+                all_active.discard(sym)
+                logger.info(f"تم إزالة {sym} من السجل لأنه مغلق حالياً في باينانس.")
+                
+        state_manager.save_active_symbols(all_active)
+        logger.info(f"✅ اكتملت المزامنة. الصفقات المفتوحة الفعلية: {all_active if all_active else 'لا يوجد'}")
+    except Exception as e:
+        logger.error(f"⚠️ فشل مزامنة الصفقات مع باينانس، سنعتمد على الملف المحلي: {e}")
+        
+    last_heartbeat_time = 0
+    
+    # حلقة التشغيل المستمرة
+    while True:
+        try:
+            current_timestamp = time.time()
+            # إرسال Heartbeat كل ساعتين للتيليجرام للتأكد من أن البوت حي
+            if current_timestamp - last_heartbeat_time > 7200:
+                mode_str = "TESTNET" if getattr(Config, 'USE_TESTNET', False) else "LIVE"
+                active_count = len(state_manager.get_active_symbols())
+                max_trades = getattr(Config, 'TESTNET_MAX_OPEN_TRADES', 1) if getattr(Config, 'USE_TESTNET', False) else getattr(Config, 'MAX_OPEN_TRADES', 1)
+                
+                notifier.send_message(f"✅ <b>Bot is alive & running</b>\nMode: <code>{mode_str}</code>\nOpen trades: {active_count}/{max_trades}\nState file: <code>{os.getenv('STATE_FILE', 'bot_state.json')}</code>")
+                last_heartbeat_time = current_timestamp
+
+            check_network_connection(client)
+            run_bot_iteration(
+                client, hybrid_strategy, risk_manager, trailing_manager, state_manager, notifier, news_engine, 
+                ai_engine, ta_engine, social_engine, universe_filter, derivatives_filter,
+                last_scan_time
+            )
+                
+            last_scan_time = int(time.time() * 1000)
+        except SystemExit:
+            raise # نمرر الإغلاق للخروج من البوت بشكل كامل
+        except Exception as e:
+            logger.error(f"❌ حدث خطأ غير متوقع أثناء دورة المسح: {e}")
+            
+        logger.info("⏳ تم انتهاء الدورة. البوت الآن في وضع مراقبة الصفقات المفتوحة (15 دقيقة)...")
+        
+        # وقت آخر فحص للصفقات المفتوحة (دقيق لتجنب فجوات الوقت)
+        monitor_last_time = int(time.time() * 1000)
+        
+        # استراحة مقسمة لمراقبة الصفقات المفتوحة والأوامر المعلقة (90 حلقة × 10 ثانية = 900 ثانية)
+        for _ in range(90):
+            try:
+                check_network_connection(client)
+                monitor_virtual_orders(client, state_manager, notifier, trailing_manager, risk_manager)
+                monitor_last_time = monitor_active_trades(client, state_manager, trailing_manager, alert_manager, notifier, monitor_last_time)
+            except Exception as e:
+                pass
+            time.sleep(10)
+
+if __name__ == "__main__":
+    main()
