@@ -4,6 +4,7 @@ import os
 import time
 import requests
 from datetime import datetime
+from html import escape as html_escape
 from core.config import Config
 from core.logger import logger
 from utils.api_key_pool import APIKeyPool
@@ -511,12 +512,17 @@ class APIStatusMonitor:
 
             required = "أساسي" if r.get("required", True) else "اختياري"
 
+            safe_name = html_escape(str(r.get("name", "")), quote=False)
+            safe_status = html_escape(str(r.get("status", "")), quote=False)
+            safe_reason = html_escape(str(r.get("reason", ""))[:220], quote=False)
+            safe_required = html_escape(str(required), quote=False)
+
             msg += (
-                f"{emoji} <b>{r['name']}</b> "
-                f"(<code>{required}</code>)\n"
-                f"• الحالة: <code>{r['status']}</code>\n"
+                f"{emoji} <b>{safe_name}</b> "
+                f"(<code>{safe_required}</code>)\n"
+                f"• الحالة: <code>{safe_status}</code>\n"
                 f"• الزمن: <code>{r['latency_ms']:.0f} ms</code>\n"
-                f"• السبب: <code>{str(r['reason'])[:220]}</code>\n"
+                f"• السبب: <code>{safe_reason}</code>\n"
             )
             
             if r.get("details", {}).get("keys"):

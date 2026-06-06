@@ -3,6 +3,7 @@ import threading
 import time
 import os
 import sys
+import re
 from html import escape
 from core.config import Config
 from core.logger import logger
@@ -73,7 +74,11 @@ class TelegramNotifier:
             return None
 
     def _safe_html(self, value):
-        return escape(str(value), quote=False)
+        return escape(str(value or ""), quote=False)
+
+    def _strip_html(self, text: str) -> str:
+        """إزالة وسوم HTML عند فشل الإرسال."""
+        return re.sub(r"<[^>]+>", "", str(text or ""))
 
     # ==========================================================
     # GUI Keyboards
@@ -272,16 +277,17 @@ class TelegramNotifier:
     # ==========================================================
     def send_message(self, text: str, reply_markup: dict = None, disable_web_page_preview: bool = True):
         """
-        إرسال رسالة نصية إلى تيليجرام مع دعم:
-        - تقسيم الرسائل الطويلة.
-        - أزرار تفاعلية.
-        - HTML parse mode.
+        إرسال رسالة تيليجرام مع fallback:
+        - المحاولة الأولى HTML.
+        - إذا فشل Bad Request، يعيد الإرسال كنص عادي بدون HTML.
+        - يمنع سقوط الرد بسبب كسر وسوم HTML أو تقسيم الرسالة.
         """
         if not self._is_configured():
             logger.debug("إعدادات تيليجرام غير مكتملة، تم تخطي إرسال الإشعار.")
             return False
 
-        MAX_LEN = 4096
+        MAX_LEN = 3900  # أقل من 4096 لتجنب مشاكل الحدود
+        text = str(text or "")
         chunks = [text[i:i + MAX_LEN] for i in range(0, len(text), MAX_LEN)]
         success = True
 
@@ -299,7 +305,26 @@ class TelegramNotifier:
 
             try:
                 response = requests.post(f"{self.base_url}/sendMessage", json=payload, timeout=10)
-                response.raise_for_status()
+
+                if response.status_code == 400:
+                    logger.warning(
+                        f"Telegram Bad Request HTML. Retrying plain text. Response: {response.text[:300]}"
+                    )
+                    plain_payload = {
+                        "chat_id": self.chat_id,
+                        "text": self._strip_html(chunk),
+                        "disable_web_page_preview": disable_web_page_preview,
+                    }
+                    if reply_markup and index == len(chunks) - 1:
+                        plain_payload["reply_markup"] = reply_markup
+
+                    plain_response = requests.post(
+                        f"{self.base_url}/sendMessage", json=plain_payload, timeout=10
+                    )
+                    plain_response.raise_for_status()
+                else:
+                    response.raise_for_status()
+
             except Exception as e:
                 logger.error(f"فشل إرسال إشعار تيليجرام: {e}")
                 success = False
@@ -311,6 +336,7 @@ class TelegramNotifier:
     def edit_message(self, chat_id, message_id, text: str, reply_markup: dict = None):
         """
         تعديل رسالة موجودة عند الضغط على الأزرار.
+        إذا فشل HTML، يرسل رسالة جديدة كنص عادي بدل أن يختفي الرد.
         """
         payload = {
             "chat_id": chat_id,
@@ -323,7 +349,28 @@ class TelegramNotifier:
         if reply_markup:
             payload["reply_markup"] = reply_markup
 
-        return self._post("editMessageText", payload, timeout=10)
+        result = self._post("editMessageText", payload, timeout=10)
+
+        # لو فشل HTML، نرسل رسالة جديدة كنص عادي بدل أن يختفي الرد
+        if result is None:
+            plain_payload = {
+                "chat_id": chat_id,
+                "text": self._strip_html(text),
+                "disable_web_page_preview": True,
+            }
+            if reply_markup:
+                plain_payload["reply_markup"] = reply_markup
+            try:
+                response = requests.post(
+                    f"{self.base_url}/sendMessage", json=plain_payload, timeout=10
+                )
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"فشل fallback لإرسال رسالة بديلة بعد فشل editMessageText: {e}")
+                return None
+
+        return result
 
     def answer_callback(self, callback_query_id, text: str = "تم ✅", show_alert: bool = False):
         payload = {
@@ -894,12 +941,11 @@ class TelegramNotifier:
                 self.run_health_report(client, state_manager)
 
             elif data == "gui_api_status":
-                self.edit_message(
-                    chat_id,
-                    message_id,
-                    "🧪 <b>جاري فحص كل خدمات البوت...</b>\n"
-                    "قد يستغرق الفحص 20 إلى 60 ثانية حسب استجابة APIs.",
-                    self.main_menu_keyboard(),
+                self.answer_callback(callback_id, "بدأ فحص الخدمات...")
+
+                self.send_message(
+                    "🧪 جاري فحص كل خدمات البوت...\n"
+                    "قد يستغرق الفحص 20 إلى 60 ثانية. سأرسل النتيجة هنا عند الانتهاء."
                 )
 
                 def _run():
@@ -916,11 +962,12 @@ class TelegramNotifier:
                     except Exception as e:
                         logger.error(f"فشل فحص الخدمات من تيليجرام: {e}")
                         self.send_message(
-                            f"⚠️ فشل فحص الخدمات:\n<code>{e}</code>",
+                            f"⚠️ فشل فحص الخدمات:\n{self._safe_html(e)}",
                             reply_markup=self.back_home_keyboard()
                         )
 
                 threading.Thread(target=_run, daemon=True).start()
+                return
 
             elif data == "gui_analyze":
                 self.edit_message(
