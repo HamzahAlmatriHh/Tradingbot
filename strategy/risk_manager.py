@@ -38,10 +38,11 @@ class RiskManager:
         logger.info(f"حساب المخاطرة: رصيد={balance:.2f}, مخاطرة مسموحة={risk_amount:.2f}$, كمية={amount:.6f}")
         return amount
 
-    def calculate_trade_plan(self, side: str, entry: float, sl: float, market_levels: dict):
+    def calculate_trade_plan(self, side: str, entry: float, sl: float, market_levels: dict, min_rr: float = None):
         """
         حساب خطة التداول باختيار أفضل مجمع سيولة يعطي RR ممتاز
         """
+        min_rr = float(min_rr if min_rr is not None else self.min_rr)
         risk = self._risk(side, entry, sl)
         if risk <= 0:
             logger.warning(f"خطر: الستوب لوز {sl} غير منطقي للدخول {entry} من جهة {side}")
@@ -62,18 +63,21 @@ class RiskManager:
             tp = self._front_run_tp(side, target["price"])
             reward = self._reward(side, entry, tp)
             
-            # منع القسمة على الصفر
+            # لا نقبل هدفاً أصبح غير مربح بعد front-run
+            if reward <= 0:
+                continue
+
             rr = reward / risk if risk > 0 else 0
             
             target["tp"] = tp
             target["rr"] = rr
             
             # إذا كان أول هدف هو منطقة سيولة قوية جداً ولكنه لا يعطي RR جيد، نمنع الصفقة
-            if rr < self.min_rr and target.get("quality", 1.0) >= 1.2:
+            if rr < min_rr and target.get("quality", 1.0) >= 1.2:
                 blocking_target = target
                 break
                 
-            if rr >= self.min_rr:
+            if rr >= min_rr:
                 valid_targets.append(target)
                 
         if blocking_target:
@@ -87,7 +91,7 @@ class RiskManager:
 
         if not valid_targets:
             best_available = max(targets, key=lambda x: x.get("rr", 0))
-            logger.warning(f"لا يوجد هدف سيولة يحقق RR {self.min_rr}. أفضل متاح: {best_available.get('rr',0):.2f}")
+            logger.warning(f"لا يوجد هدف سيولة يحقق RR {min_rr}. أفضل متاح: {best_available.get('rr',0):.2f}")
             return {
                 "valid": False,
                 "reason": "No SMC target provides acceptable RR.",
@@ -140,13 +144,28 @@ class RiskManager:
                     
         return targets
 
-    def calculate_sl_tp(self, side: str, entry_price: float, support: float = None, resistance: float = None, atr: float = None, invalidation_level: float = None, market_levels: dict = None):
+    def calculate_sl_tp(
+        self,
+        side: str,
+        entry_price: float,
+        support: float = None,
+        resistance: float = None,
+        atr: float = None,
+        invalidation_level: float = None,
+        market_levels: dict = None,
+        filter_profile: dict = None,
+    ):
         """
         طريقة متوافقة مع الكود القديم لـ main.py تقوم بحساب الـ SL وتستخدم خطة التداول لاستخراج الـ TP.
         إذا لم تتوفر خطة تحقق RR يرجع None للهدف لإلغاء الصفقة.
         """
         atr_sl_mult = getattr(Config, 'ATR_SL_MULTIPLIER', 1.0)
         use_atr = getattr(Config, 'USE_ATR_TARGETS', False) and atr is not None and atr > 0
+        
+        filter_profile = filter_profile or {}
+        profile_min_rr = float(filter_profile.get("min_rr", self.min_rr))
+        allow_rr_fallback = bool(filter_profile.get("allow_rr_fallback", False))
+        fallback_rr = float(filter_profile.get("fallback_rr") or 1.5)
         
         # 1. تحديد وقف الخسارة
         if invalidation_level and invalidation_level > 0:
@@ -156,13 +175,38 @@ class RiskManager:
 
         # 2. خطة التداول لاختيار الـ SMC TP
         if market_levels:
-            plan = self.calculate_trade_plan(side, entry_price, sl, market_levels)
+            plan = self.calculate_trade_plan(
+                side,
+                entry_price,
+                sl,
+                market_levels,
+                min_rr=profile_min_rr,
+            )
+
             if plan.get("valid"):
                 return sl, plan["tp"]
-            else:
-                logger.warning(f"فشل في اختيار هدف يطابق المواصفات بسبب: {plan.get('reason')}")
-                # نرجع None للـ TP حتى يعرف main.py أن هذه الصفقة يجب رفضها لضعف الـ RR
-                return sl, None
+
+            logger.warning(f"فشل في اختيار هدف يطابق المواصفات بسبب: {plan.get('reason')}")
+
+            # في الوضع المتوسط/الخفيف نسمح بهدف RR بديل لاختبار التنفيذ، خصوصاً في Testnet
+            if allow_rr_fallback:
+                risk_amount = entry_price - sl if side == "buy" else sl - entry_price
+
+                if risk_amount > 0:
+                    fallback_tp = (
+                        entry_price + (risk_amount * fallback_rr)
+                        if side == "buy"
+                        else entry_price - (risk_amount * fallback_rr)
+                    )
+
+                    logger.warning(
+                        f"[FILTER PROFILE FALLBACK] لا يوجد هدف SMC صالح. "
+                        f"استخدام TP بديل RR={fallback_rr}: {fallback_tp}"
+                    )
+                    return sl, fallback_tp
+
+            # Strict mode: رفض الصفقة
+            return sl, None
                 
         # (Fallback القديم للطوارئ إذا لم توجد market_levels)
         risk_amount = entry_price - sl if side == 'buy' else sl - entry_price

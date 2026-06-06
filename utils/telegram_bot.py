@@ -9,6 +9,12 @@ from core.config import Config
 from core.logger import logger
 from utils.performance_tracker import PerformanceTracker
 from utils.api_status_monitor import APIStatusMonitor
+from strategy.filter_profiles import (
+    FILTER_PROFILES,
+    get_filter_profile,
+    set_filter_profile,
+    format_filter_profile_status,
+)
 
 
 class TelegramNotifier:
@@ -95,6 +101,9 @@ class TelegramNotifier:
                 ],
                 [
                     {"text": "📋 التقارير والأداء", "callback_data": "gui_reports_menu"},
+                ],
+                [
+                    {"text": "🎚️ نسبة الفلاتر والشروط", "callback_data": "gui_filter_profile"},
                 ],
                 [
                     {"text": "⏱️ فترة المسح", "callback_data": "gui_scan_interval"},
@@ -186,6 +195,14 @@ class TelegramNotifier:
                 ],
             ]
         }
+
+    def filter_profile_keyboard(self):
+        """قائمة اختيار وضع الفلاتر"""
+        buttons = []
+        for key, p in FILTER_PROFILES.items():
+            buttons.append([{"text": f"{p['label']} - {p['desc'][:20]}...", "callback_data": f"filterprofile_{key}"}])
+        buttons.append([{"text": "🏠 الرجوع للرئيسية", "callback_data": "gui_home"}])
+        return {"inline_keyboard": buttons}
 
     def scan_interval_keyboard(self):
         """قائمة إعداد فترة المسح"""
@@ -422,6 +439,9 @@ class TelegramNotifier:
 ⚙️ <code>/setmax 5</code>
 تغيير الحد الأقصى للصفقات المفتوحة.
 
+🎚️ <code>/filters</code>
+تغيير وضع الفلاتر وشروط الدخول.
+
 🩺 <code>/health</code>
 عرض تقرير صحة النظام.
 
@@ -578,6 +598,9 @@ class TelegramNotifier:
         if getattr(Config, "USE_TESTNET", False) and simulated_cap > 0:
             msg += f"🧪 <b>وضع المحفظة:</b> <code>Simulated Wallet</code>\n"
             msg += f"🏁 <b>رأس البداية الوهمي:</b> <code>{simulated_cap:.2f}</code> USDT\n"
+
+        # Trading Filter Profile Status
+        msg += "\n" + format_filter_profile_status(state_manager) + "\n"
 
         max_trades = getattr(Config, "TESTNET_MAX_OPEN_TRADES", None)
         if max_trades is not None:
@@ -811,6 +834,14 @@ class TelegramNotifier:
         elif text == "/health":
             self.run_health_report(client, state_manager)
 
+        elif text == "/filters":
+            self.send_message(
+                f"🎚️ <b>إعدادات الفلاتر الحالية:</b>\n\n"
+                f"{format_filter_profile_status(state_manager)}\n\n"
+                f"اختر الوضع الجديد من القائمة أدناه:",
+                reply_markup=self.filter_profile_keyboard()
+            )
+
         elif text in ["/apis", "/api", "/services"]:
             self.send_message("🧪 جاري فحص كل الخدمات... انتظر قليلاً.")
             threading.Thread(
@@ -1029,6 +1060,29 @@ class TelegramNotifier:
                     self.main_menu_keyboard(),
                 )
                 logger.info(f"تم تغيير الحد الأقصى للصفقات المفتوحة إلى {new_max} عبر GUI تيليجرام.")
+
+            elif data == "gui_filter_profile":
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    f"🎚️ <b>إعدادات الفلاتر الحالية:</b>\n\n"
+                    f"{format_filter_profile_status(state_manager)}\n\n"
+                    f"اختر الوضع الجديد من القائمة أدناه:",
+                    self.filter_profile_keyboard()
+                )
+
+            elif data.startswith("filterprofile_"):
+                profile_key = data.replace("filterprofile_", "")
+                if profile_key in FILTER_PROFILES:
+                    set_filter_profile(state_manager, profile_key)
+                    self.edit_message(
+                        chat_id,
+                        message_id,
+                        f"✅ تم تغيير وضع الفلاتر إلى:\n\n{format_filter_profile_status(state_manager)}",
+                        self.main_menu_keyboard()
+                    )
+                else:
+                    self.answer_callback(callback_id, "⚠️ وضع غير معروف!")
 
             elif data == "gui_scan_interval":
                 current_sec = int(state_manager.get("scan_interval_seconds", 600))

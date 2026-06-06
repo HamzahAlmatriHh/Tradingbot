@@ -22,6 +22,7 @@ from core.config import Config
 from core.universe_filter import UniverseFilter
 from filters.derivatives_risk_filter import DerivativesRiskFilter
 from utils.api_status_monitor import APIStatusMonitor
+from strategy.filter_profiles import get_filter_profile
 
 def maybe_send_periodic_reports(notifier, state_manager, client=None):
     """
@@ -143,6 +144,8 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
     """
     دالة موحدة لتنفيذ أمر الماركت، حساب الستوب/الهدف الديناميكي (Sniper)، وضع الأوامر، وتحديث الحالة المحفوظة.
     """
+    filter_profile = get_filter_profile(state_manager)
+
     # حساب الستوب والهدف بناءً على السعر الحالي أولاً للتأكد من جودة الـ RR
     sl, tp = risk_manager.calculate_sl_tp(
         final_decision, 
@@ -151,7 +154,8 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
         resistance=coin_data.get('resistance'),
         atr=atr_val,
         invalidation_level=invalidation_level,
-        market_levels=coin_data.get('market_levels', {})
+        market_levels=coin_data.get('market_levels', {}),
+        filter_profile=filter_profile,
     )
     
     if tp is None:
@@ -175,12 +179,13 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
             resistance=coin_data.get('resistance'),
             atr=atr_val,
             invalidation_level=invalidation_level,
-            market_levels=coin_data.get('market_levels', {})
+            market_levels=coin_data.get('market_levels', {}),
+            filter_profile=filter_profile,
         )
         if tp is None:
             # لو الانزلاق خرب الصفقة، نستخدم الهدف القديم مؤقتاً كخطة طوارئ
             sl, tp = risk_manager.calculate_sl_tp(
-                final_decision, actual_entry, support=coin_data.get('support'), resistance=coin_data.get('resistance'), atr=atr_val, invalidation_level=invalidation_level
+                final_decision, actual_entry, support=coin_data.get('support'), resistance=coin_data.get('resistance'), atr=atr_val, invalidation_level=invalidation_level, filter_profile=filter_profile
             )
         
         logger.info(f"!!! تم تنفيذ إشارة تداول !!! لـ {symbol}")
@@ -246,7 +251,8 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
                 "partial_amount": float(protection_meta.get("partial_amount", amount * getattr(Config, "PARTIAL_TP_PCT", 0.5))),
                 "runner_amount": float(protection_meta.get("runner_amount", amount * (1 - getattr(Config, "PARTIAL_TP_PCT", 0.5)))),
                 "original_amount": float(amount),
-                "current_sl": float(sl)
+                "current_sl": float(sl),
+                "filter_profile": filter_profile.get("key", "strict"),
             }
             state_manager.save_entry_metadata(symbol, entry_meta)
             logger.info(f"تم حفظ بيانات دخول صفقة {symbol} بنجاح.")
@@ -1040,14 +1046,71 @@ def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, ri
                 # فلتر 2: سيولة قوية تدل على تدخل المال الذكي (اختراق المتوسط بـ 20%)
                 is_volume_confirmed = current_volume > (avg_volume * 1.2)
                 
-                if is_closed_correctly and is_volume_confirmed and swept_liquidity:
-                    logger.info(f"✅ [Sniper CONFIRMED] تم تأكيد الدخول للزوج {symbol} (شمعة مغلقة ارتدادية + فوليوم عالي). التنفيذ فوراً...")
-                    notifier.send_message(f"✅ <b>إشارة دخول مؤكدة (Confirmed Signal):</b>\nالزوج <code>{symbol}</code> أثبت ارتداده من الـ Order Block بحجم تداول عالي.\nجاري التنفيذ...")
+                # ------------------------------------------------------------
+                # Trading Filter Profile من تيليجرام
+                # ------------------------------------------------------------
+                filter_profile = get_filter_profile(state_manager)
+
+                require_volume = bool(filter_profile.get("require_volume", True))
+                require_entry_sweep = bool(filter_profile.get("require_entry_sweep", True))
+
+                sniper_confirmed = (
+                    is_closed_correctly
+                    and (is_volume_confirmed or not require_volume)
+                    and (swept_liquidity or not require_entry_sweep)
+                )
+
+                if sniper_confirmed:
+                    logger.info(
+                        f"✅ [Sniper CONFIRMED] {symbol} | "
+                        f"profile={filter_profile.get('key')} | "
+                        f"closed={is_closed_correctly}, "
+                        f"volume={is_volume_confirmed}, "
+                        f"sweep={swept_liquidity}"
+                    )
+
+                    notifier.send_message(
+                        f"✅ <b>إشارة دخول مؤكدة</b>\n"
+                        f"الزوج: <code>{symbol}</code>\n"
+                        f"وضع الفلاتر: <b>{filter_profile.get('label')}</b>\n"
+                        f"closed=<code>{is_closed_correctly}</code> | "
+                        f"volume=<code>{is_volume_confirmed}</code> | "
+                        f"sweep=<code>{swept_liquidity}</code>\n"
+                        f"جاري التنفيذ."
+                    )
                     
                     # إعادة حساب الحجم بدقة بناءً على السعر اللحظي ومستوى الستوب
-                    usdt_free = client.get_balance().get('USDT', {}).get('free', 0)
-                    temp_sl, _ = risk_manager.calculate_sl_tp(side, current_price, atr=v_order['atr'], invalidation_level=v_order.get('invalidation_level', current_price), market_levels=v_order.get('market_levels'))
-                    new_amount = risk_manager.calculate_position_size(usdt_free, current_price, custom_risk_percent=v_order['trade_risk_pct'], atr=v_order['atr'], sl=temp_sl)
+                    balance = client.get_balance()
+                    usdt_free = balance.get("USDT", {}).get("free", 0) if balance else 0
+
+                    if getattr(Config, "USE_TESTNET", False) and getattr(Config, "TESTNET_SIMULATED_BALANCE", 0) > 0:
+                        info = balance.get("info", {}) if balance else {}
+                        total_unrealized = float(info.get("totalUnrealizedProfit", 0) or 0)
+
+                        tracker = PerformanceTracker(state_manager)
+                        sim_wallet = tracker.get_wallet(unrealized_pnl=total_unrealized)
+                        usdt_free = sim_wallet["available"]
+
+                    temp_sl, _ = risk_manager.calculate_sl_tp(
+                        side,
+                        current_price,
+                        atr=v_order["atr"],
+                        invalidation_level=v_order.get("invalidation_level", current_price),
+                        market_levels=v_order.get("market_levels"),
+                        filter_profile=filter_profile,
+                    )
+
+                    recalculated_amount = risk_manager.calculate_position_size(
+                        usdt_free,
+                        current_price,
+                        custom_risk_percent=v_order["trade_risk_pct"],
+                        atr=v_order["atr"],
+                        sl=temp_sl,
+                    )
+
+                    # لا نسمح أن يكون الحجم الجديد أكبر من الحجم الأصلي المحسوب وقت إنشاء الأمر الافتراضي
+                    original_amount = float(v_order.get("amount", recalculated_amount) or recalculated_amount)
+                    new_amount = min(original_amount, recalculated_amount)
                     
                     if new_amount <= 0:
                         logger.warning(f"⚠️ الرصيد الحر لا يكفي لفتح الصفقة {symbol}")
@@ -1081,7 +1144,12 @@ def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, ri
                 else:
                     logger.info(
                         f"⏳ [Sniper WAIT] {symbol}: لم يكتمل التأكيد. "
-                        f"closed={is_closed_correctly}, volume={is_volume_confirmed}, sweep={swept_liquidity}"
+                        f"profile={filter_profile.get('key')}, "
+                        f"closed={is_closed_correctly}, "
+                        f"volume={is_volume_confirmed}, "
+                        f"sweep={swept_liquidity}, "
+                        f"require_volume={require_volume}, "
+                        f"require_sweep={require_entry_sweep}"
                     )
                     
             except Exception as e:
