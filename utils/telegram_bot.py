@@ -849,7 +849,7 @@ class TelegramNotifier:
             elif data in ["report_daily", "report_weekly", "report_monthly", "report_yearly"]:
                 period = data.replace("report_", "")
                 tracker = PerformanceTracker(state_manager)
-                text = tracker.format_report(period)
+                text = tracker.format_report(period, client=client)
 
                 self.edit_message(
                     chat_id,

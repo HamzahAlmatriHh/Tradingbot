@@ -21,7 +21,7 @@ from core.config import Config
 from core.universe_filter import UniverseFilter
 from filters.derivatives_risk_filter import DerivativesRiskFilter
 
-def maybe_send_periodic_reports(notifier, state_manager):
+def maybe_send_periodic_reports(notifier, state_manager, client=None):
     """
     يرسل تقارير Daily / Weekly / Monthly / Yearly مرة واحدة فقط لكل فترة.
     تعتمد على testnet_trades_log.csv كمصدر حقيقة.
@@ -53,7 +53,7 @@ def maybe_send_periodic_reports(notifier, state_manager):
 
     def send_report(period):
         try:
-            text = tracker.format_report(period)
+            text = tracker.format_report(period, client=client)
             ok = notifier.send_message(text)
             if ok:
                 mark_sent(period)
@@ -1410,7 +1410,7 @@ def main():
                 last_heartbeat_time = current_timestamp
 
             try:
-                maybe_send_periodic_reports(notifier, state_manager)
+                maybe_send_periodic_reports(notifier, state_manager, client)
             except Exception as e:
                 logger.error(f"فشل فحص التقارير الدورية: {e}")
 
@@ -1469,7 +1469,7 @@ def main():
                     notifier,
                     monitor_last_time
                 )
-                maybe_send_periodic_reports(notifier, state_manager)
+                maybe_send_periodic_reports(notifier, state_manager, client)
             except Exception as e:
                 logger.error(f"خطأ أثناء وضع المراقبة بين جولات المسح: {e}")
 

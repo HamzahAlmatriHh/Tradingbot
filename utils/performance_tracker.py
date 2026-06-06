@@ -288,10 +288,87 @@ class PerformanceTracker:
             "avg_slippage": avg_slippage,
         }
 
+    def get_open_positions_snapshot(self, client=None):
+        """
+        يعرض الصفقات المفتوحة من state_manager.
+        إذا توفر client يحسب السعر الحالي والـ Unrealized PNL.
+        """
+        if not self.state_manager:
+            return []
+
+        try:
+            state = self.state_manager.get_state()
+            metadata = state.get("entry_metadata", {}) or {}
+        except Exception as e:
+            logger.error(f"[PerformanceTracker] فشل قراءة الصفقات المفتوحة من state: {e}")
+            return []
+
+        open_positions = []
+
+        for symbol, meta in metadata.items():
+            try:
+                side_raw = str(meta.get("side", "")).upper()
+                side = "BUY" if side_raw in ["BUY", "LONG"] else "SELL"
+
+                entry_price = float(meta.get("entry_price", 0.0) or 0.0)
+                amount = float(
+                    meta.get("runner_amount")
+                    if meta.get("partial_tp_done")
+                    else meta.get("amount", 0.0)
+                ) or 0.0
+
+                sl = float(meta.get("current_sl") or meta.get("sl") or 0.0)
+                tp = float(meta.get("tp1") or meta.get("tp") or 0.0)
+
+                current_price = 0.0
+                if client is not None:
+                    try:
+                        ticker = client.exchange.fetch_ticker(symbol)
+                        current_price = float(
+                            ticker.get("last")
+                            or ticker.get("close")
+                            or ticker.get("bid")
+                            or ticker.get("ask")
+                            or 0.0
+                        )
+                    except Exception as e:
+                        logger.debug(f"[PerformanceTracker] تعذر جلب السعر الحالي لـ {symbol}: {e}")
+
+                unrealized_pnl = 0.0
+                unrealized_pct = 0.0
+
+                if current_price > 0 and entry_price > 0 and amount > 0:
+                    if side == "BUY":
+                        unrealized_pnl = (current_price - entry_price) * amount
+                        unrealized_pct = ((current_price - entry_price) / entry_price) * 100
+                    else:
+                        unrealized_pnl = (entry_price - current_price) * amount
+                        unrealized_pct = ((entry_price - current_price) / entry_price) * 100
+
+                open_positions.append({
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": entry_price,
+                    "current_price": current_price,
+                    "amount": amount,
+                    "sl": sl,
+                    "tp": tp,
+                    "unrealized_pnl": unrealized_pnl,
+                    "unrealized_pct": unrealized_pct,
+                    "partial_tp_enabled": bool(meta.get("partial_tp_enabled", False)),
+                    "partial_tp_done": bool(meta.get("partial_tp_done", False)),
+                    "entry_time": meta.get("entry_time", ""),
+                })
+
+            except Exception as e:
+                logger.error(f"[PerformanceTracker] خطأ أثناء تجهيز صفقة مفتوحة {symbol}: {e}")
+
+        return open_positions
+
     # ==========================================================
     # Telegram Formatting
     # ==========================================================
-    def format_report(self, period: str, recent_limit=None) -> str:
+    def format_report(self, period: str, recent_limit=None, client=None) -> str:
         stats = self.period_stats(period)
         wallet = self.get_wallet()
 
@@ -333,6 +410,47 @@ class PerformanceTracker:
         msg += f"• Realized PNL: <code>{wallet['realized_pnl']:+.2f}</code> USDT\n"
         msg += f"• الرصيد الحالي: <code>{wallet['wallet_balance']:.2f}</code> USDT\n"
         msg += f"• العائد الكلي: <code>{wallet['total_return_pct']:+.2f}%</code>\n\n"
+
+        # ==========================================================
+        # Open Positions Section
+        # ==========================================================
+        open_positions = self.get_open_positions_snapshot(client=client)
+
+        msg += "📌 <b>الصفقات المفتوحة الآن</b>\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+
+        if not open_positions:
+            msg += "لا توجد صفقات مفتوحة حالياً.\n\n"
+        else:
+            total_unrealized = sum(p["unrealized_pnl"] for p in open_positions)
+
+            for p in open_positions:
+                side_emoji = "🟢" if p["side"] == "BUY" else "🔴"
+                pnl_emoji = "✅" if p["unrealized_pnl"] >= 0 else "⚠️"
+
+                partial_status = "TP1 ✅" if p["partial_tp_done"] else (
+                    "TP1 انتظار" if p["partial_tp_enabled"] else "TP كامل"
+                )
+
+                current_price_text = (
+                    f"{p['current_price']:.6f}"
+                    if p["current_price"] > 0
+                    else "غير متاح"
+                )
+
+                msg += (
+                    f"{side_emoji} <b>{html.escape(p['symbol'])}</b> "
+                    f"{'LONG' if p['side'] == 'BUY' else 'SHORT'}\n"
+                    f"• الدخول: <code>{p['entry_price']:.6f}</code>\n"
+                    f"• الحالي: <code>{current_price_text}</code>\n"
+                    f"• الكمية: <code>{p['amount']:.6f}</code>\n"
+                    f"• SL: <code>{p['sl']:.6f}</code> | TP1: <code>{p['tp']:.6f}</code>\n"
+                    f"• الحالة: <code>{partial_status}</code>\n"
+                    f"• {pnl_emoji} Unrealized: <code>{p['unrealized_pnl']:+.4f}</code> USDT "
+                    f"(<code>{p['unrealized_pct']:+.2f}%</code>)\n\n"
+                )
+
+            msg += f"📍 إجمالي الربح غير المحقق: <code>{total_unrealized:+.4f}</code> USDT\n\n"
 
         msg += f"🧾 <b>آخر {recent_limit} صفقات في الفترة</b>\n"
         msg += "━━━━━━━━━━━━━━━━━━━━\n"
