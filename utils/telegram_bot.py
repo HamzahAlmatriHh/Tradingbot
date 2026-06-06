@@ -198,11 +198,34 @@ class TelegramNotifier:
 
     def filter_profile_keyboard(self):
         """قائمة اختيار وضع الفلاتر"""
-        buttons = []
-        for key, p in FILTER_PROFILES.items():
-            buttons.append([{"text": f"{p['label']} - {p['desc'][:20]}...", "callback_data": f"filterprofile_{key}"}])
-        buttons.append([{"text": "🏠 الرجوع للرئيسية", "callback_data": "gui_home"}])
-        return {"inline_keyboard": buttons}
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "🔒 فلاتر شديدة وفرص قليلة",
+                        "callback_data": "filterprofile_strict",
+                    }
+                ],
+                [
+                    {
+                        "text": "⚖️ فلاتر متوسطة",
+                        "callback_data": "filterprofile_medium",
+                    }
+                ],
+                [
+                    {
+                        "text": "⚡ فلاتر خفيفة وفرص أكثر",
+                        "callback_data": "filterprofile_relaxed",
+                    }
+                ],
+                [
+                    {
+                        "text": "🏠 الرجوع للرئيسية",
+                        "callback_data": "gui_home",
+                    }
+                ],
+            ]
+        }
 
     def scan_interval_keyboard(self):
         """قائمة إعداد فترة المسح"""
@@ -1062,27 +1085,37 @@ class TelegramNotifier:
                 logger.info(f"تم تغيير الحد الأقصى للصفقات المفتوحة إلى {new_max} عبر GUI تيليجرام.")
 
             elif data == "gui_filter_profile":
+                text = format_filter_profile_status(state_manager)
                 self.edit_message(
                     chat_id,
                     message_id,
-                    f"🎚️ <b>إعدادات الفلاتر الحالية:</b>\n\n"
-                    f"{format_filter_profile_status(state_manager)}\n\n"
-                    f"اختر الوضع الجديد من القائمة أدناه:",
-                    self.filter_profile_keyboard()
+                    text + "\n\nاختر وضع الفلاتر المطلوب:",
+                    self.filter_profile_keyboard(),
                 )
+                self.answer_callback(callback_id, "اختر وضع الفلاتر")
+                return
 
             elif data.startswith("filterprofile_"):
-                profile_key = data.replace("filterprofile_", "")
-                if profile_key in FILTER_PROFILES:
-                    set_filter_profile(state_manager, profile_key)
-                    self.edit_message(
-                        chat_id,
-                        message_id,
-                        f"✅ تم تغيير وضع الفلاتر إلى:\n\n{format_filter_profile_status(state_manager)}",
-                        self.main_menu_keyboard()
-                    )
-                else:
-                    self.answer_callback(callback_id, "⚠️ وضع غير معروف!")
+                profile_name = data.replace("filterprofile_", "", 1)
+                profile = set_filter_profile(state_manager, profile_name)
+
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    f"✅ تم تغيير وضع الفلاتر إلى:\n\n"
+                    f"<b>{profile['label']}</b>\n\n"
+                    f"{profile['description']}\n\n"
+                    f"⚙️ Volume: <code>{'مطلوب' if profile['require_volume'] else 'اختياري'}</code>\n"
+                    f"⚙️ Entry Sweep: <code>{'مطلوب' if profile['require_entry_sweep'] else 'اختياري'}</code>\n"
+                    f"⚙️ Fallback RR: <code>{'مفعل' if profile['allow_rr_fallback'] else 'مغلق'}</code>\n"
+                    f"⚙️ Min RR: <code>{profile['min_rr']}</code>\n\n"
+                    f"سيتم تطبيق هذا الوضع من الدورة الحالية/القادمة حسب مرحلة البوت.",
+                    self.main_menu_keyboard(),
+                )
+
+                logger.info(f"تم تغيير وضع الفلاتر من تيليجرام إلى: {profile_name}")
+                self.answer_callback(callback_id, "تم تغيير وضع الفلاتر ✅")
+                return
 
             elif data == "gui_scan_interval":
                 current_sec = int(state_manager.get("scan_interval_seconds", 600))
