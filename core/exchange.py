@@ -198,6 +198,10 @@ class ExchangeClient:
         """إلغاء كافة الأوامر المفتوحة للعملة (مثل الهدف والستوب)"""
         try:
             self.exchange.cancel_all_orders(symbol)
+            try:
+                self.exchange.cancel_all_orders(symbol, params={'stop': True})
+            except Exception:
+                pass
             logger.info(f"تم إلغاء كافة الأوامر المعلقة للزوج {symbol}.")
             return True
         except Exception as e:
@@ -213,7 +217,8 @@ class ExchangeClient:
             # 2. الإغلاق بسعر السوق
             close_side = 'sell' if side.lower() == 'buy' else 'buy'
             position_side = 'LONG' if side.lower() == 'buy' else 'SHORT'
-            params = {'positionSide': position_side, 'reduceOnly': True} # reduceOnly لمنع فتح صفقة معاكسة بالخطأ
+            # لا تستخدم reduceOnly مع positionSide في Binance Hedge Mode
+            params = {'positionSide': position_side}
             logger.warning(f"🚨 جاري إغلاق الصفقة للزوج {symbol} بسعر السوق فوراً...")
             self.exchange.create_order(symbol, 'market', close_side, amount, None, params)
             logger.info(f"تم إغلاق الصفقة {symbol} بنجاح.")
@@ -238,12 +243,15 @@ class ExchangeClient:
     def cancel_sl_orders(self, symbol):
         """إلغاء جميع أوامر الستوب المفتوحة للعملة (تُستخدم لتحديث الستوب المتحرك)"""
         try:
-            open_orders = self.exchange.fetch_open_orders(symbol)
+            # يجب تمرير {'stop': True} لكي تعيد الدالة الأوامر الشرطية (Algo Orders) من باينانس
+            open_orders = self.exchange.fetch_open_orders(symbol, params={'stop': True})
             for order in open_orders:
-                order_type = order.get('type', '').upper()
-                # نُلغي فقط أوامر STOP_MARKET (الستوب الحقيقي) ولا نلغي TAKE_PROFIT_MARKET
+                # معلومات نوع الأمر الحقيقي مخفية داخل info
+                info = order.get('info', {})
+                order_type = info.get('orderType', '').upper()
                 if order_type == 'STOP_MARKET':
-                    self.exchange.cancel_order(order['id'], symbol)
+                    # نقوم بالإلغاء مع تمرير {'stop': True} أيضاً
+                    self.exchange.cancel_order(order['id'], symbol, params={'stop': True})
                     logger.debug(f"تم إلغاء أمر الستوب القديم {order['id']}")
             return True
         except Exception as e:
