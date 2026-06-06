@@ -762,11 +762,11 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
                         f"الزوج: <code>{alert.get('symbol')}</code>"
                     )
                 logger.info(f"إشعار إغلاق صفقة: {alert['symbol']} | {alert['type']} | PnL: {alert['pnl']} | Pct: {pnl_pct}%")
-                if alert['symbol'] in active_symbols:
-                    active_symbols.remove(alert['symbol'])
+                if sym_clean in active_symbols:
+                    active_symbols.remove(sym_clean)
                     state_manager.save_active_symbols(active_symbols)
-                if trailing_manager.has_trade(alert['symbol']):
-                    trailing_manager.unregister_trade(alert['symbol'])
+                if trailing_manager.has_trade(sym_clean):
+                    trailing_manager.unregister_trade(sym_clean)
 
     # جلب الرصيد الإجمالي (يشمل الرصيد المتاح + الهامش المحجوز في الصفقات)
     balance = client.get_balance()
