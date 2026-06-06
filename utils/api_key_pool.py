@@ -37,7 +37,7 @@ class APIKeyPool:
         if self.state_manager:
             self.state_manager.set(self._state_key(), state)
 
-    def get_available_keys(self):
+    def get_available_keys(self, allow_exhausted=True):
         """
         يرجع المفاتيح المتاحة الآن.
         المفاتيح التي عليها cooldown يتم تأخيرها.
@@ -46,7 +46,6 @@ class APIKeyPool:
         state = self._load_state()
 
         available = []
-        delayed = []
 
         for index, key in enumerate(self.keys):
             fp = self._fingerprint(key)
@@ -56,14 +55,12 @@ class APIKeyPool:
             disabled_until = float(meta.get("disabled_until", 0) or 0)
 
             if disabled_until > now or rate_limited_until > now:
-                delayed.append((key, meta))
                 continue
 
             available.append(key)
 
-        # إذا كلها مقفلة، رجعها كلها كآخر محاولة بدل فشل صامت
         if not available:
-            return self.keys
+            return self.keys if allow_exhausted else []
 
         return available
 

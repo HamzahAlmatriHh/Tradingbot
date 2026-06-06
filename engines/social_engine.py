@@ -10,8 +10,18 @@ class SocialEngine:
     """
     
     def __init__(self):
-        self.api_key = Config.LUNARCRUSH_API_KEY
+        self.api_key = getattr(Config, "LUNARCRUSH_API_KEY", "")
+        if not self.api_key:
+            keys = getattr(Config, "LUNARCRUSH_API_KEYS", [])
+            if keys:
+                self.api_key = keys[0]
+                
         self.base_url = "https://lunarcrush.com/api4/public"
+        
+        import time
+        self.cache = {}
+        self.cache_ttl = getattr(Config, "LUNARCRUSH_CACHE_TTL_SECONDS", 3600)
+        self.rate_limited_until = 0
         
     def get_social_sentiment(self, coin_symbol: str):
         """
@@ -31,12 +41,41 @@ class SocialEngine:
         # تحويل الرمز للشكل الصحيح (BTC/USDT -> BTC)
         symbol = coin_symbol.upper().replace('USDT', '').replace('/', '').replace(':', '').strip()
         
+        import time
+        now = time.time()
+        
+        if self.rate_limited_until > now:
+            logger.warning(f"[LunarCrush] Cooldown بسبب 429. استخدام neutral لـ {symbol}.")
+            return {
+                "label": "neutral",
+                "score": 0.5,
+                "galaxy_score": 50,
+                "social_volume": 0,
+                "social_dominance": 0,
+                "source": "lunarcrush_429_cooldown",
+            }
+        
+        cached = self.cache.get(symbol)
+        if cached and now - cached["time"] < self.cache_ttl:
+            return cached["data"]
+        
         url = f"{self.base_url}/coins/{symbol}/v1"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         
         try:
             logger.debug(f"[LunarCrush] جاري جلب مشاعر السوق الاجتماعية لـ {symbol}...")
             response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code == 429:
+                self.rate_limited_until = time.time() + getattr(Config, "LUNARCRUSH_429_COOLDOWN_SECONDS", 600)
+                return {
+                    "label": "neutral",
+                    "score": 0.5,
+                    "galaxy_score": 50,
+                    "social_volume": 0,
+                    "social_dominance": 0,
+                    "source": "lunarcrush_429",
+                }
             
             if response.status_code == 404:
                 logger.debug(f"[LunarCrush] {symbol} غير موجود في قاعدة بيانات LunarCrush.")
@@ -75,7 +114,7 @@ class SocialEngine:
                 label = 'neutral'
                 score = 0.5
                 
-            return {
+            result = {
                 'label': label,
                 'score': min(score, 1.0),  # لا يتجاوز 1.0
                 'galaxy_score': galaxy_score,
@@ -84,6 +123,8 @@ class SocialEngine:
                 'raw_sentiment_pct': sentiment_pct,
                 'source': 'lunarcrush'
             }
+            self.cache[symbol] = {"time": now, "data": result}
+            return result
             
         except requests.exceptions.RequestException as e:
             logger.error(f"[LunarCrush] فشل الاتصال لـ {symbol}: {e}")

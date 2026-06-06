@@ -605,19 +605,12 @@ class TelegramNotifier:
         total_unrealized = float(info.get("totalUnrealizedProfit", 0))
         total_margin = float(info.get("totalMarginBalance", usdt_available))
 
-        # ميزة الرصيد الوهمي المقيد.
-        simulated_cap = getattr(Config, "TESTNET_SIMULATED_BALANCE", 0)
-        if getattr(Config, "USE_TESTNET", False) and simulated_cap > 0:
-            tracker = PerformanceTracker(state_manager)
-            sim_wallet = tracker.get_wallet(unrealized_pnl=total_unrealized)
+        # لا نستبدل رصيد Binance الحقيقي بالمحفظة المرجعية
+        initial = state_manager.get_initial_balance()
+        pnl_day = wallet_balance - initial if initial else 0
 
-            wallet_balance = sim_wallet["equity"]
-            usdt_available = sim_wallet["available"]
-            total_margin = sim_wallet["reserved_margin"]
-            pnl_day = wallet_balance - state_manager.get_initial_balance() if state_manager.get_initial_balance() else 0
-        else:
-            initial = state_manager.get_initial_balance()
-            pnl_day = wallet_balance - initial if initial else 0
+        tracker = PerformanceTracker(state_manager)
+        ref_wallet = tracker.get_wallet(unrealized_pnl=0.0)
 
         # 2. جلب الصفقات مباشرة من باينانس.
         try:
@@ -642,9 +635,10 @@ class TelegramNotifier:
         msg += f"📌 <b>الهامش/المحفظة:</b> <code>{float(total_margin):.2f}</code> USDT\n"
         msg += f"🟢 <b>الصفقات المفتوحة:</b> <code>{len(live_positions)}</code>\n"
 
-        if getattr(Config, "USE_TESTNET", False) and simulated_cap > 0:
-            msg += f"🧪 <b>وضع المحفظة:</b> <code>Simulated Wallet</code>\n"
-            msg += f"🏁 <b>رأس البداية الوهمي:</b> <code>{simulated_cap:.2f}</code> USDT\n"
+        msg += "\n🧪 <b>محفظة مرجعية 50$</b>\n"
+        msg += f"• رأس البداية المرجعي: <code>{ref_wallet['starting_balance']:.2f}</code> USDT\n"
+        msg += f"• Realized مرجعي: <code>{ref_wallet['realized_pnl']:+.4f}</code> USDT\n"
+        msg += f"• رصيد مرجعي: <code>{ref_wallet['wallet_balance']:.4f}</code> USDT\n"
 
         # Trading Filter Profile Status
         msg += "\n" + format_filter_profile_status(state_manager) + "\n"
@@ -842,6 +836,9 @@ class TelegramNotifier:
             self.user_state.pop(user_key, None)
             if text.isdigit():
                 new_lev = int(text)
+                min_lev = int(getattr(Config, "MIN_LEVERAGE", 1))
+                max_lev = int(getattr(Config, "MAX_LEVERAGE", 20))
+                new_lev = max(min_lev, min(new_lev, max_lev))
                 state_manager.set("trade_leverage", new_lev)
                 self.send_message(
                     f"✅ تم تغيير الرافعة إلى: <b>{new_lev}x</b>.",
@@ -1145,6 +1142,9 @@ class TelegramNotifier:
 
             elif data.startswith("setlev_"):
                 new_lev = int(data.replace("setlev_", "", 1))
+                min_lev = int(getattr(Config, "MIN_LEVERAGE", 1))
+                max_lev = int(getattr(Config, "MAX_LEVERAGE", 20))
+                new_lev = max(min_lev, min(new_lev, max_lev))
                 state_manager.set("trade_leverage", new_lev)
                 self.edit_message(
                     chat_id,

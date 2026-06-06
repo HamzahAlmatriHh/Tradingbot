@@ -711,6 +711,7 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
                         continue
 
                 pnl_pct = 0.0
+                exit_details = None
                 try:
                     exit_details = handle_trade_close(alert, state_manager, client=client)
                     if exit_details:
@@ -718,7 +719,22 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
                 except Exception as e:
                     logger.error(f"خطأ أثناء تسجيل إغلاق الصفقة: {e}")
                     
-                notifier.send_pnl_alert(alert['symbol'], alert['type'], alert['price'], alert['pnl'], pnl_pct)
+                if exit_details:
+                    notifier.send_pnl_alert(
+                        alert['symbol'],
+                        alert['type'],
+                        exit_details.get('exit_price', alert.get('price', 0.0)),
+                        exit_details.get('pnl', alert.get('pnl', 0.0)),
+                        exit_details.get('pnl_pct', 0.0),
+                        wallet_pnl_pct=exit_details.get("wallet_pnl_pct", 0.0),
+                        pnl_ref_50=exit_details.get("pnl_ref_50", 0.0),
+                        reference_balance=exit_details.get("reference_balance", getattr(Config, "REFERENCE_BALANCE", 50.0)),
+                    )
+                else:
+                    notifier.send_message(
+                        f"⚠️ <b>تم رصد إغلاق صفقة لكن فشل تسجيلها</b>\n"
+                        f"الزوج: <code>{alert.get('symbol')}</code>"
+                    )
                 logger.info(f"إشعار إغلاق صفقة: {alert['symbol']} | {alert['type']} | PnL: {alert['pnl']} | Pct: {pnl_pct}%")
                 if alert['symbol'] in active_symbols:
                     active_symbols.remove(alert['symbol'])
@@ -1035,19 +1051,26 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
                         created_at = datetime.now()
                         expires_at = created_at + timedelta(minutes=max_age_minutes)
                         
-                        sl = float(invalidation_level)
-                        if final_decision.lower() == 'buy':
-                            tp = float(optimal_entry + (optimal_entry - sl) * 2)
-                        else:
-                            tp = float(optimal_entry - (sl - optimal_entry) * 2)
+                        temp_sl, temp_tp = risk_manager.calculate_sl_tp(
+                            final_decision,
+                            optimal_entry,
+                            atr=atr_val,
+                            invalidation_level=invalidation_level,
+                            market_levels=coin_data.get("market_levels", {}),
+                            filter_profile=filter_profile,
+                        )
+
+                        if temp_tp is None:
+                            logger.warning(f"[{symbol}] لن يتم إنشاء أمر معلق لأن TP غير صالح.")
+                            continue
 
                         virtual_order = {
                             "side": final_decision,
                             "entry_price": float(optimal_entry),
                             "optimal_entry": float(optimal_entry),
-                            "sl": float(sl),
-                            "tp": float(tp),
-                            "invalidation_level": float(invalidation_level),
+                            "sl": float(temp_sl),
+                            "tp": float(temp_tp),
+                            "invalidation_level": float(temp_sl),
                             "ob_mid": float(coin_data.get('ob_mid', optimal_entry)),
                             "amount": float(amount),
                             "atr": float(atr_val),
@@ -1714,12 +1737,29 @@ def monitor_active_trades(client, state_manager, trailing_manager, alert_manager
                         'pnl': pnl
                     }
 
-                notifier.send_pnl_alert(alert['symbol'], alert['type'], alert['price'], alert['pnl'], alert.get('pnl_pct', 0.0))
-                logger.info(f"إشعار فوري: إغلاق {alert['symbol']} | PnL: {alert['pnl']}")
+                exit_details = None
                 try:
-                    handle_trade_close(alert, state_manager, client=client)
+                    exit_details = handle_trade_close(alert, state_manager, client=client)
                 except Exception as e:
                     logger.error(f"خطأ أثناء تسجيل إغلاق الصفقة في مراقب الخلفية: {e}")
+                    
+                if exit_details:
+                    notifier.send_pnl_alert(
+                        alert["symbol"],
+                        alert["type"],
+                        exit_details.get("exit_price", alert.get("price", 0.0)),
+                        exit_details.get("pnl", alert.get("pnl", 0.0)),
+                        exit_details.get("pnl_pct", 0.0),
+                        wallet_pnl_pct=exit_details.get("wallet_pnl_pct", 0.0),
+                        pnl_ref_50=exit_details.get("pnl_ref_50", 0.0),
+                        reference_balance=exit_details.get("reference_balance", getattr(Config, "REFERENCE_BALANCE", 50.0)),
+                    )
+                else:
+                    notifier.send_message(
+                        f"⚠️ <b>تم رصد إغلاق صفقة لكن فشل تسجيلها</b>\n"
+                        f"الزوج: <code>{alert.get('symbol')}</code>"
+                    )
+                logger.info(f"إشعار فوري: إغلاق {alert['symbol']} | PnL: {alert['pnl']}")
                     
                 # تنظيف الذاكرة
                 if sym in active_symbols:

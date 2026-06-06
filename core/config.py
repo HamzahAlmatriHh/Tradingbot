@@ -105,6 +105,11 @@ class Config:
         os.getenv("LUNARCRUSH_API_KEY"),
         os.getenv("LUNARCRUSH_API_KEYS")
     )
+    
+    LUNARCRUSH_CACHE_TTL_SECONDS = int(os.getenv("LUNARCRUSH_CACHE_TTL_SECONDS", 3600))
+    LUNARCRUSH_429_COOLDOWN_SECONDS = int(os.getenv("LUNARCRUSH_429_COOLDOWN_SECONDS", 600))
+    
+    TRADE_JOURNAL_TZ = os.getenv("TRADE_JOURNAL_TZ", "UTC")
 
     COINGECKO_API_KEYS = merge_keys(
         os.getenv("COINGECKO_API_KEY"),
