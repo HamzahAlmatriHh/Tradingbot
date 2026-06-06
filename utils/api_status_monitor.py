@@ -197,20 +197,42 @@ class APIStatusMonitor:
                     "https://cryptopanic.com/api/v1/posts/",
                     params=params,
                 )
-                data = response.json() if response.text else {}
-    
-                if response.ok and "results" in data:
+
+                content_type = response.headers.get("content-type", "")
+                raw_text = response.text or ""
+
+                if not response.ok:
+                    pool.mark_failure(
+                        key,
+                        response.status_code,
+                        raw_text[:180] or f"HTTP {response.status_code}"
+                    )
+                    last_reason = f"HTTP {response.status_code}: {raw_text[:180]}"
+                    continue
+
+                if "application/json" not in content_type.lower():
+                    pool.mark_failure(
+                        key,
+                        response.status_code,
+                        f"Non-JSON response: {raw_text[:180]}"
+                    )
+                    last_reason = f"Non-JSON response: {raw_text[:180]}"
+                    continue
+
+                data = response.json()
+
+                if "results" in data:
                     pool.mark_success(key)
-                    return self._result("CryptoPanic", "OK", latency_ms, "CryptoPanic OK.", details={"keys": pool.stats()})
-    
-                pool.mark_failure(key, response.status_code, response.text[:180])
-                last_reason = f"HTTP {response.status_code}: {response.text[:180]}"
-    
+                    return self._result("CryptoPanic", "OK", latency_ms, "CryptoPanic OK.", required=False, details={"keys": pool.stats()})
+
+                pool.mark_failure(key, response.status_code, str(data)[:180])
+                last_reason = str(data)[:180]
+
             except Exception as e:
                 pool.mark_failure(key, 0, str(e))
                 last_reason = str(e)
                 
-        return self._result("CryptoPanic", "DOWN", reason=f"All keys failed. Last: {last_reason}", details={"keys": pool.stats()})
+        return self._result("CryptoPanic", "DOWN", reason=f"All keys failed. Last: {last_reason}", required=False, details={"keys": pool.stats()})
 
 
     def check_lunarcrush(self):
@@ -262,22 +284,21 @@ class APIStatusMonitor:
         for key in available:
             try:
                 headers = {
-                    "coinglassApiKey": key,
+                    "CG-API-KEY": key,
                     "accept": "application/json",
                 }
                 response, latency_ms = self._request_json(
                     "GET",
-                    "https://open-api.coinglass.com/public/v2/open_interest",
+                    "https://open-api-v4.coinglass.com/api/futures/supported-coins",
                     headers=headers,
-                    params={"symbol": "BTC"},
                 )
 
                 if response.status_code == 200:
                     data = response.json() if response.text else {}
-                    if str(data.get("code")) in ["0", "200"] or data.get("data"):
+                    if data:
                         pool.mark_success(key)
                         details = {"keys": pool.stats()}
-                        return self._result("CoinGlass", "OK", latency_ms, "At least one CoinGlass key works.", details=details)
+                        return self._result("CoinGlass", "OK", latency_ms, "CoinGlass v4 supported-coins OK.", details=details)
 
                 pool.mark_failure(key, response.status_code, response.text[:180])
                 last_reason = f"HTTP {response.status_code}: {response.text[:180]}"

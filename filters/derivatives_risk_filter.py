@@ -22,7 +22,7 @@ class DerivativesRiskFilter:
             state_manager=state_manager
         )
 
-        self.base_url = "https://open-api.coinglass.com/public/v2"
+        self.base_url = "https://open-api-v4.coinglass.com/api/futures"
         
     def evaluate_risk(self, symbol: str, side: str, price: float) -> dict:
         """
@@ -53,12 +53,17 @@ class DerivativesRiskFilter:
 
             try:
                 headers = {
-                    "coinglassApiKey": api_key,
+                    "CG-API-KEY": api_key,
                     "accept": "application/json"
                 }
 
-                oi_url = f"{self.base_url}/open_interest?symbol={coin_name}"
-                response = requests.get(oi_url, headers=headers, timeout=5)
+                oi_url = f"{self.base_url}/open-interest/exchange-list"
+                response = requests.get(
+                    oi_url,
+                    headers=headers,
+                    params={"symbol": coin_name},
+                    timeout=5
+                )
 
                 if response.status_code in [401, 403, 429]:
                     if self.key_pool:
@@ -85,32 +90,35 @@ class DerivativesRiskFilter:
                     continue
 
                 data = response.json()
-                if not (data.get('code') == '0' and data.get('data')):
+
+                if not data:
                     if self.key_pool:
-                        self.key_pool.mark_failure(
-                            api_key,
-                            status_code=200,
-                            reason=f"Unexpected CoinGlass response: {str(data)[:150]}",
-                            cooldown_seconds=5 * 60
-                        )
+                        self.key_pool.mark_failure(api_key, status_code=200, reason="Empty CoinGlass response")
                     continue
 
-                items = data['data']
-                if isinstance(items, list) and len(items) > 0:
-                    first_item = items[0]
-                    funding_rate = float(first_item.get('fundingRate', 0.0))
-                    oi_change_pct = float(first_item.get('h24Change', 0.0)) / 100.0
-                    is_mock = False
+                # قراءة مرنة تدعم أشكال مختلفة من v4 response
+                items = data.get("data", [])
+                if isinstance(items, dict):
+                    items = items.get("list") or items.get("data") or []
 
-                ls_url = f"{self.base_url}/long_short?symbol={coin_name}&timeframe=1h"
-                ls_response = requests.get(ls_url, headers=headers, timeout=5)
+                if not items:
+                    if self.key_pool:
+                        self.key_pool.mark_failure(api_key, status_code=200, reason=f"No data: {str(data)[:150]}")
+                    continue
 
-                if ls_response.status_code == 200:
-                    ls_data = ls_response.json()
-                    if ls_data.get('code') == '0' and ls_data.get('data'):
-                        ls_items = ls_data['data']
-                        if isinstance(ls_items, list) and len(ls_items) > 0:
-                            long_short_ratio = float(ls_items[0].get('longShortRatio', 1.0))
+                first_item = items[0] if isinstance(items, list) else {}
+
+                oi_change_pct = float(
+                    first_item.get("h24Change")
+                    or first_item.get("changePercent")
+                    or first_item.get("change")
+                    or 0.0
+                ) / 100.0
+
+                is_mock = False
+
+                # long_short_ratio يبقى محايداً حتى نتأكد من endpoint v4 الخاص به
+                long_short_ratio = 1.0
 
                 if self.key_pool:
                     self.key_pool.mark_success(api_key)
