@@ -115,6 +115,7 @@ class TelegramNotifier:
                 ],
                 [
                     {"text": "⚙️ الحد الأقصى للصفقات", "callback_data": "gui_setmax"},
+                    {"text": "⚙️ الرافعة", "callback_data": "gui_leverage"},
                 ],
                 [
                     {"text": "🔄 إعادة تشغيل", "callback_data": "gui_restart_confirm"},
@@ -189,6 +190,25 @@ class TelegramNotifier:
                 [
                     {"text": "10", "callback_data": "setmax_10"},
                     {"text": "✍️ إدخال يدوي", "callback_data": "gui_setmax_manual"},
+                ],
+                [
+                    {"text": "🏠 الرئيسية", "callback_data": "gui_home"},
+                ],
+            ]
+        }
+
+    def leverage_keyboard(self):
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "1x", "callback_data": "setlev_1"},
+                    {"text": "3x", "callback_data": "setlev_3"},
+                    {"text": "5x", "callback_data": "setlev_5"},
+                    {"text": "10x", "callback_data": "setlev_10"},
+                ],
+                [
+                    {"text": "20x", "callback_data": "setlev_20"},
+                    {"text": "✍️ إدخال يدوي", "callback_data": "gui_setlev_manual"},
                 ],
                 [
                     {"text": "🏠 الرئيسية", "callback_data": "gui_home"},
@@ -522,7 +542,7 @@ class TelegramNotifier:
 
         return self.send_message(text, reply_markup=keyboard)
 
-    def send_pnl_alert(self, symbol, order_type, price, pnl, pnl_pct=0.0):
+    def send_pnl_alert(self, symbol, order_type, price, pnl, pnl_pct=0.0, wallet_pnl_pct=0.0, pnl_ref_50=0.0, reference_balance=50.0):
         """
         إرسال إشعار عند إغلاق صفقة.
         """
@@ -545,8 +565,12 @@ class TelegramNotifier:
 🚦 <b>النتيجة:</b> {result_text}
 
 💰 <b>سعر الإغلاق:</b> <code>{float(price):.6f}</code>
-💵 <b>الصافي:</b> <code>{float(pnl):+.2f} USDT</code> {pnl_color}
-📊 <b>النسبة المئوية:</b> <code>{float(pnl_pct):+.2f}%</code>
+💵 <b>الصافي (Binance/Testnet):</b> <code>{float(pnl):+.2f} USDT</code> {pnl_color}
+📊 <b>النسبة للمحفظة الفعلية:</b> <code>{float(wallet_pnl_pct):+.2f}%</code>
+
+🧪 <b>تأثير المحفظة المرجعية ({reference_balance}$):</b>
+• <b>مبلغ التأثير:</b> <code>{float(pnl_ref_50):+.4f} USDT</code>
+• <b>النسبة من ({reference_balance}$):</b> <code>{float(wallet_pnl_pct):+.2f}%</code>
 """
 
         keyboard = {
@@ -808,6 +832,23 @@ class TelegramNotifier:
                 logger.info(f"تم تغيير الحد الأقصى للصفقات المفتوحة إلى {new_max} عبر تيليجرام.")
             else:
                 self.user_state.pop(user_key, None)
+                self.send_message(
+                    "⚠️ إدخال غير صحيح. تم إلغاء العملية.",
+                    reply_markup=self.main_menu_keyboard(),
+                )
+            return
+
+        if pending == "awaiting_setlev":
+            self.user_state.pop(user_key, None)
+            if text.isdigit():
+                new_lev = int(text)
+                state_manager.set("trade_leverage", new_lev)
+                self.send_message(
+                    f"✅ تم تغيير الرافعة إلى: <b>{new_lev}x</b>.",
+                    reply_markup=self.main_menu_keyboard(),
+                )
+                logger.info(f"تم تغيير الرافعة إلى {new_lev}x عبر تيليجرام.")
+            else:
                 self.send_message(
                     "⚠️ إدخال غير صحيح. تم إلغاء العملية.",
                     reply_markup=self.main_menu_keyboard(),
@@ -1083,6 +1124,35 @@ class TelegramNotifier:
                     self.main_menu_keyboard(),
                 )
                 logger.info(f"تم تغيير الحد الأقصى للصفقات المفتوحة إلى {new_max} عبر GUI تيليجرام.")
+
+            elif data == "gui_leverage":
+                current_lev = state_manager.get("trade_leverage", getattr(Config, "LEVERAGE", 10))
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    f"⚙️ <b>الرافعة الحالية:</b> <code>{current_lev}x</code>\n\nاختر رقم من الأزرار أو إدخال يدوي:",
+                    self.leverage_keyboard(),
+                )
+
+            elif data == "gui_setlev_manual":
+                self.user_state[str(chat_id)] = "awaiting_setlev"
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    "🔢 <b>أرسل رقم الرافعة فقط:</b>\nمثال: <code>10</code>",
+                    self.main_menu_keyboard(),
+                )
+
+            elif data.startswith("setlev_"):
+                new_lev = int(data.replace("setlev_", "", 1))
+                state_manager.set("trade_leverage", new_lev)
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    f"✅ تم تغيير الرافعة إلى: <b>{new_lev}x</b>.",
+                    self.main_menu_keyboard(),
+                )
+                logger.info(f"تم تغيير الرافعة إلى {new_lev}x عبر GUI تيليجرام.")
 
             elif data == "gui_filter_profile":
                 text = format_filter_profile_status(state_manager)

@@ -23,6 +23,7 @@ from core.universe_filter import UniverseFilter
 from filters.derivatives_risk_filter import DerivativesRiskFilter
 from utils.api_status_monitor import APIStatusMonitor
 from strategy.filter_profiles import get_filter_profile
+from utils.trade_journal import TradeJournal
 
 def maybe_send_periodic_reports(notifier, state_manager, client=None):
     """
@@ -83,6 +84,25 @@ def maybe_send_periodic_reports(notifier, state_manager, client=None):
         send_report("yearly")
 
 
+def get_wallet_equity_snapshot(client):
+    try:
+        if client is None: return 0.0, 0.0
+        bal = client.get_balance()
+        info = bal.get("info", {}) if bal else {}
+
+        equity = (
+            info.get("totalMarginBalance")
+            or info.get("totalWalletBalance")
+            or bal.get("USDT", {}).get("total", 0)
+        )
+
+        available = bal.get("USDT", {}).get("free", 0) if bal else 0
+
+        return float(equity or 0.0), float(available or 0.0)
+    except Exception as e:
+        logger.error(f"فشل جلب لقطة المحفظة: {e}")
+        return 0.0, 0.0
+
 def log_testnet_trade(symbol, entry_meta, exit_details):
     """
     تسجيل الصفقات الفردية لـ Testnet بالكامل في ملف CSV محلي
@@ -95,7 +115,8 @@ def log_testnet_trade(symbol, entry_meta, exit_details):
         "trade_id", "symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price",
         "pnl", "pnl_pct", "exit_reason", "entry_reason", "sentiment_score", "adx",
         "ema_200", "atr", "spread", "volume_24h", "risk_pct", "leverage", "slippage",
-        "amount"
+        "amount", "filter_profile", "journal_dir",
+        "wallet_equity_at_entry", "wallet_pnl_pct", "reference_balance", "pnl_ref_50"
     ]
     
     exit_time = exit_details.get("exit_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -105,6 +126,16 @@ def log_testnet_trade(symbol, entry_meta, exit_details):
         f"{symbol}|{entry_meta.get('side', '')}|{entry_time}|"
         f"{entry_meta.get('entry_price', 0.0)}|{exit_time}|{exit_details.get('exit_price', 0.0)}"
     )
+
+    # منع تكرار نفس الصفقة في السجل إذا وصل إشعار الإغلاق مرتين
+    if file_exists:
+        try:
+            old_df = pd.read_csv(file_path)
+            if "trade_id" in old_df.columns and trade_id in set(old_df["trade_id"].astype(str)):
+                logger.warning(f"⚠️ الصفقة {trade_id} مسجلة مسبقًا، سيتم تجاهل التكرار.")
+                return
+        except Exception as e:
+            logger.warning(f"تعذر فحص تكرار الصفقة في CSV: {e}")
     
     row = {
         "trade_id": trade_id,
@@ -128,6 +159,12 @@ def log_testnet_trade(symbol, entry_meta, exit_details):
         "leverage": entry_meta.get("leverage", 1.0),
         "slippage": exit_details.get("slippage", 0.0),
         "amount": entry_meta.get("amount", 0.0),
+        "filter_profile": entry_meta.get("filter_profile", ""),
+        "journal_dir": entry_meta.get("journal_dir", ""),
+        "wallet_equity_at_entry": entry_meta.get("wallet_equity_at_entry", 0.0),
+        "wallet_pnl_pct": exit_details.get("wallet_pnl_pct", 0.0),
+        "reference_balance": entry_meta.get("reference_balance", 50.0),
+        "pnl_ref_50": exit_details.get("pnl_ref_50", 0.0),
     }
     
     try:
@@ -223,11 +260,60 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
             if symbol in active_symbols:
                 active_symbols.remove(symbol)
                 state_manager.save_active_symbols(active_symbols)
+            
+            # عند فشل الحماية، احفظ تقرير فشل دخول/حماية
+            try:
+                emergency_exit_details = {
+                    "exit_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "exit_price": actual_entry,
+                    "pnl": 0.0,
+                    "pnl_pct": 0.0,
+                    "exit_reason": "PROTECTION_FAILED_EMERGENCY_CLOSE",
+                    "slippage": 0.0,
+                }
+
+                TradeJournal().finalize_trade(
+                    client=client,
+                    symbol=symbol,
+                    entry_meta={
+                        "side": final_decision.upper(),
+                        "entry_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "entry_price": float(actual_entry),
+                        "amount": float(amount),
+                        "sl": float(sl),
+                        "tp": float(tp),
+                        "entry_reason": "Protection failed after entry",
+                        "filter_profile": filter_profile.get("key", "strict"),
+                    },
+                    exit_details=emergency_exit_details,
+                )
+            except Exception as e:
+                logger.error(f"[TradeJournal] فشل تسجيل الإغلاق الطارئ لـ {symbol}: {e}")
+
             return False
         
         try:
             latest_bar = bars_df.iloc[-2] if bars_df is not None and len(bars_df) > 1 else {}
+            wallet_equity_at_entry, wallet_available_at_entry = get_wallet_equity_snapshot(client)
+            reference_balance = float(getattr(Config, "REFERENCE_BALANCE", 50.0))
+
             entry_meta = {
+                "wallet_equity_at_entry": wallet_equity_at_entry,
+                "wallet_available_at_entry": wallet_available_at_entry,
+                "reference_balance": reference_balance,
+                "exchange_order_id": order.get("id") if isinstance(order, dict) else None,
+                "exchange_order": {
+                    "id": order.get("id"),
+                    "clientOrderId": order.get("clientOrderId"),
+                    "status": order.get("status"),
+                    "type": order.get("type"),
+                    "side": order.get("side"),
+                    "price": order.get("price"),
+                    "average": order.get("average"),
+                    "filled": order.get("filled"),
+                    "amount": order.get("amount"),
+                    "cost": order.get("cost"),
+                } if isinstance(order, dict) else {},
                 "side": final_decision.upper(),
                 "entry_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "entry_price": float(actual_entry),
@@ -254,6 +340,57 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
                 "current_sl": float(sl),
                 "filter_profile": filter_profile.get("key", "strict"),
             }
+            # ==================================================
+            # Trade Journal: تبرير الدخول وسجل الشموع
+            # ==================================================
+            try:
+                planned_risk = abs(float(actual_entry) - float(sl))
+                planned_reward = abs(float(tp) - float(actual_entry))
+                planned_rr = planned_reward / planned_risk if planned_risk > 0 else 0.0
+
+                decision_context = {
+                    "symbol": symbol,
+                    "side": final_decision,
+                    "filter_profile": filter_profile,
+                    "ta_trend": ta_trend,
+                    "entry_reason": coin_data.get("reason", ""),
+                    "sentiment": sentiment or {},
+                    "sniper": coin_data.get("sniper", {}),
+                    "support": coin_data.get("support"),
+                    "resistance": coin_data.get("resistance"),
+                    "invalidation_level": invalidation_level,
+                    "risk_plan": {
+                        "entry": float(actual_entry),
+                        "sl": float(sl),
+                        "tp": float(tp),
+                        "planned_rr": round(planned_rr, 4),
+                        "atr": float(atr_val or 0.0),
+                        "risk_pct": float(trade_risk_pct * 100),
+                        "leverage": int(trade_leverage),
+                    },
+                    "market_levels_summary": {
+                        "bullish_obs": len((coin_data.get("market_levels") or {}).get("bullish_obs", [])),
+                        "bearish_obs": len((coin_data.get("market_levels") or {}).get("bearish_obs", [])),
+                        "bullish_fvgs": len((coin_data.get("market_levels") or {}).get("bullish_fvgs", [])),
+                        "bearish_fvgs": len((coin_data.get("market_levels") or {}).get("bearish_fvgs", [])),
+                    },
+                }
+
+                entry_meta["decision_context"] = decision_context
+
+                journal_dir = TradeJournal().record_entry(
+                    client=client,
+                    symbol=symbol,
+                    entry_meta=entry_meta,
+                    decision_context=decision_context,
+                )
+
+                if journal_dir:
+                    entry_meta["journal_dir"] = journal_dir
+
+            except Exception as e:
+                logger.error(f"[TradeJournal] فشل تسجيل مبررات دخول الصفقة {symbol}: {e}")
+
             state_manager.save_entry_metadata(symbol, entry_meta)
             logger.info(f"تم حفظ بيانات دخول صفقة {symbol} بنجاح.")
         except Exception as e:
@@ -279,7 +416,7 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
         return True
     return False
 
-def handle_trade_close(alert, state_manager):
+def handle_trade_close(alert, state_manager, client=None):
     """
     معالجة إغلاق الصفقة: استخراج بيانات الدخول، حساب الانزلاق والنسبة المئوية، وتسجيل الصفقة في CSV
     """
@@ -316,6 +453,19 @@ def handle_trade_close(alert, state_manager):
     }
     
     log_testnet_trade(symbol, entry_meta, exit_details)
+    
+    try:
+        if client is not None:
+            journal_dir = TradeJournal().finalize_trade(
+                client=client,
+                symbol=symbol,
+                entry_meta=entry_meta,
+                exit_details=exit_details,
+            )
+            if journal_dir:
+                logger.info(f"[TradeJournal] ملفات تحليل الصفقة محفوظة في: {journal_dir}")
+    except Exception as e:
+        logger.error(f"[TradeJournal] فشل إنهاء سجل الصفقة {symbol}: {e}")
     
     try:
         tracker = PerformanceTracker(state_manager)
@@ -562,7 +712,7 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
 
                 pnl_pct = 0.0
                 try:
-                    exit_details = handle_trade_close(alert, state_manager)
+                    exit_details = handle_trade_close(alert, state_manager, client=client)
                     if exit_details:
                         pnl_pct = exit_details.get("pnl_pct", 0.0)
                 except Exception as e:
@@ -656,11 +806,16 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
         logger.info(f"[{symbol}] تصنيف العملة: {coin_type.upper()} ({classification_reason})")
         
         # إعدادات الرافعة والمخاطرة المخصصة
-        trade_leverage = Config.LEVERAGE
+        trade_leverage = int(state_manager.get("trade_leverage", getattr(Config, "LEVERAGE", 10)))
+        min_lev = int(getattr(Config, "MIN_LEVERAGE", 1))
+        max_lev = int(getattr(Config, "MAX_LEVERAGE", 20))
+        trade_leverage = max(min_lev, min(trade_leverage, max_lev))
+
         trade_risk_pct = Config.RISK_PER_TRADE_PERCENT / 100.0
         
         if coin_type in ['meme', 'new']:
-            trade_leverage = getattr(Config, 'MEME_LEVERAGE', 3)
+            # لا نغيّر الرافعة هنا؛ الرافعة تتحكم بها Telegram/Config.
+            # نخفض المخاطرة فقط للعملات عالية الخطورة.
             trade_risk_pct = getattr(Config, 'MEME_RISK_PER_TRADE_PERCENT', 0.25) / 100.0
             logger.info(f"[{symbol}] تطبيق إعدادات حماية الميم/الجديد: رافعة {trade_leverage}x | مخاطرة {trade_risk_pct*100:.2f}%")
             
@@ -1126,7 +1281,28 @@ def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, ri
                         trade_leverage=v_order['trade_leverage'],
                         trade_risk_pct=v_order['trade_risk_pct'],
                         atr_val=v_order['atr'],
-                        coin_data={'support': v_order['support'], 'resistance': v_order['resistance'], 'price': current_price, 'reason': 'SMC Multi-Confirmed', 'market_levels': v_order.get('market_levels', {})},
+                        coin_data={
+                            'support': v_order['support'],
+                            'resistance': v_order['resistance'],
+                            'price': current_price,
+                            'reason': 'SMC Multi-Confirmed',
+                            'market_levels': v_order.get('market_levels', {}),
+                            'sniper': {
+                                'closed_correctly': bool(is_closed_correctly),
+                                'volume_confirmed': bool(is_volume_confirmed),
+                                'swept_liquidity': bool(swept_liquidity),
+                                'require_volume': bool(require_volume),
+                                'require_entry_sweep': bool(require_entry_sweep),
+                                'profile': filter_profile.get("key"),
+                                'closed_candle': {
+                                    'open': float(closed_candle.get('open', 0)),
+                                    'high': float(closed_candle.get('high', 0)),
+                                    'low': float(closed_candle.get('low', 0)),
+                                    'close': float(closed_candle.get('close', 0)),
+                                    'volume': float(closed_candle.get('volume', 0)),
+                                }
+                            }
+                        },
                         sentiment={'label': v_order['sentiment_label'], 'score': v_order['sentiment_score']},
                         bars_df=bars_df,
                         ticker=client.exchange.fetch_ticker(symbol),
@@ -1383,7 +1559,7 @@ def monitor_active_trades(client, state_manager, trailing_manager, alert_manager
                 notifier.send_pnl_alert(alert['symbol'], alert['type'], alert['price'], alert['pnl'], alert.get('pnl_pct', 0.0))
                 logger.info(f"إشعار فوري: إغلاق {alert['symbol']} | PnL: {alert['pnl']}")
                 try:
-                    handle_trade_close(alert, state_manager)
+                    handle_trade_close(alert, state_manager, client=client)
                 except Exception as e:
                     logger.error(f"خطأ أثناء تسجيل إغلاق الصفقة في مراقب الخلفية: {e}")
                     

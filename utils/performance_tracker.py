@@ -198,6 +198,30 @@ class PerformanceTracker:
 
         return wallet
 
+    def get_exchange_wallet_snapshot(self, client=None):
+        if client is None:
+            return None
+
+        try:
+            bal = client.get_balance()
+            info = bal.get("info", {}) if bal else {}
+
+            wallet_balance = float(info.get("totalWalletBalance", 0) or 0)
+            unrealized = float(info.get("totalUnrealizedProfit", 0) or 0)
+            equity = float(info.get("totalMarginBalance", wallet_balance + unrealized) or 0)
+            available = float(bal.get("USDT", {}).get("free", 0) if bal else 0)
+
+            return {
+                "wallet_balance": wallet_balance,
+                "unrealized_pnl": unrealized,
+                "equity": equity,
+                "available": available,
+            }
+
+        except Exception as e:
+            logger.error(f"[PerformanceTracker] فشل قراءة محفظة Binance: {e}")
+            return None
+
     # ==========================================================
     # Period Stats
     # ==========================================================
@@ -405,11 +429,23 @@ class PerformanceTracker:
         msg += f"• أسوأ صفقة: <code>{stats['worst_trade']:+.2f}</code> USDT\n"
         msg += f"• متوسط الانزلاق: <code>{stats['avg_slippage']:.3f}%</code>\n\n"
 
-        msg += "💳 <b>المحفظة الوهمية التراكمية</b>\n"
-        msg += f"• رأس البداية: <code>{wallet['starting_balance']:.2f}</code> USDT\n"
-        msg += f"• Realized PNL: <code>{wallet['realized_pnl']:+.2f}</code> USDT\n"
-        msg += f"• الرصيد الحالي: <code>{wallet['wallet_balance']:.2f}</code> USDT\n"
-        msg += f"• العائد الكلي: <code>{wallet['total_return_pct']:+.2f}%</code>\n\n"
+        exchange_wallet = self.get_exchange_wallet_snapshot(client)
+
+        if exchange_wallet:
+            msg += "💼 <b>محفظة Binance / Testnet الفعلية</b>\n"
+            msg += f"• Equity: <code>{exchange_wallet['equity']:.2f}</code> USDT\n"
+            msg += f"• Wallet Balance: <code>{exchange_wallet['wallet_balance']:.2f}</code> USDT\n"
+            msg += f"• Available: <code>{exchange_wallet['available']:.2f}</code> USDT\n"
+            msg += f"• Unrealized PNL: <code>{exchange_wallet['unrealized_pnl']:+.2f}</code> USDT\n\n"
+
+        ref_balance = float(getattr(Config, "REFERENCE_BALANCE", 50.0))
+        df_all = self.load_trades()
+        ref_pnl_total = float(df_all["pnl_ref_50"].sum()) if not df_all.empty and "pnl_ref_50" in df_all.columns else 0.0
+
+        msg += "🧪 <b>محفظة مرجعية للمقارنة</b>\n"
+        msg += f"• رأس مرجعي: <code>{ref_balance:.2f}</code> USDT\n"
+        msg += f"• PNL مرجعي: <code>{ref_pnl_total:+.4f}</code> USDT\n"
+        msg += f"• رصيد مرجعي: <code>{ref_balance + ref_pnl_total:.4f}</code> USDT\n\n"
 
         # ==========================================================
         # Open Positions Section

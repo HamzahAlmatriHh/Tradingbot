@@ -53,7 +53,10 @@ class Config:
     # إعدادات التداول الافتراضية
     TRADE_SYMBOL = "BTC/USDT"
     RISK_PER_TRADE_PERCENT = 0.25 # تم التخفيض بناءً على مراجعة الأمان
-    LEVERAGE = 1                  # رافعة مالية 1x (بدون رافعة فعلية) للنسخة الحية
+    LEVERAGE = int(os.getenv("LEVERAGE", 10))
+    MIN_LEVERAGE = int(os.getenv("MIN_LEVERAGE", 1))
+    MAX_LEVERAGE = int(os.getenv("MAX_LEVERAGE", 20))
+    REFERENCE_BALANCE = float(os.getenv("REFERENCE_BALANCE", 50.0))
     MAX_OPEN_TRADES = 6           # تم زيادته إلى 6 صفقات في نفس الوقت
     DAILY_LOSS_LIMIT_PERCENT = 1.0 # إيقاف صارم إذا خسر 1% يومياً
 
@@ -186,5 +189,15 @@ class Config:
         "DEGEN/USDT",
         "HOME/USDT"
     ]
+
+    # ==========================================================
+    # Trade Journal / Post-Trade Forensics
+    # ==========================================================
+    TRADE_JOURNAL_ENABLED = os.getenv("TRADE_JOURNAL_ENABLED", "true").lower() == "true"
+    TRADE_JOURNAL_DIR = os.getenv("TRADE_JOURNAL_DIR", os.path.join(DATA_DIR, "trade_journal"))
+    TRADE_JOURNAL_TIMEFRAMES = os.getenv("TRADE_JOURNAL_TIMEFRAMES", "1m,5m,15m")
+    TRADE_JOURNAL_PRE_MINUTES = int(os.getenv("TRADE_JOURNAL_PRE_MINUTES", 45))
+    TRADE_JOURNAL_POST_MINUTES = int(os.getenv("TRADE_JOURNAL_POST_MINUTES", 15))
+    TRADE_JOURNAL_FETCH_TRADES = os.getenv("TRADE_JOURNAL_FETCH_TRADES", "true").lower() == "true"
 
 
