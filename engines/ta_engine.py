@@ -100,7 +100,38 @@ class TAEngine:
             df['fvg_bearish_low'] = df['fvg_bearish_low'].ffill()
             df['fvg_bearish_high'] = df['fvg_bearish_high'].ffill()
 
-            logger.debug("تم حساب SMC بشكل متقدم (OB Zones, Displacement, FVG, BOS).")
+            # --- OB Age & Mitigation ---
+            df['bullish_ob_created'] = bullish_ob_cond
+            df['bearish_ob_created'] = bearish_ob_cond
+            
+            ages_bullish = []
+            ages_bearish = []
+            last_bull_idx = None
+            last_bear_idx = None
+            
+            for i in range(len(df)):
+                # Bullish
+                if df['bullish_ob_created'].iloc[i]:
+                    last_bull_idx = i
+                    ages_bullish.append(0)
+                elif last_bull_idx is not None:
+                    ages_bullish.append(i - last_bull_idx)
+                else:
+                    ages_bullish.append(np.nan)
+                    
+                # Bearish
+                if df['bearish_ob_created'].iloc[i]:
+                    last_bear_idx = i
+                    ages_bearish.append(0)
+                elif last_bear_idx is not None:
+                    ages_bearish.append(i - last_bear_idx)
+                else:
+                    ages_bearish.append(np.nan)
+                    
+            df['ob_bullish_age'] = ages_bullish
+            df['ob_bearish_age'] = ages_bearish
+
+            logger.debug("تم حساب SMC بشكل متقدم (OB Zones, Displacement, FVG, BOS, Age).")
             return df
             
         except Exception as e:
@@ -132,13 +163,17 @@ class TAEngine:
         ob_bearish_high = latest.get('ob_bearish_high', 0)
         ob_bearish_mid = latest.get('ob_bearish_mid', 0)
         
-        # Invalidation Check (لمنع الدخول في مناطق مكسورة أو مستهلكة بشدة)
+        ob_bullish_age = latest.get('ob_bullish_age', 999)
+        ob_bearish_age = latest.get('ob_bearish_age', 999)
+        max_ob_age = 80 # 80 شمعة 15 دقيقة = 20 ساعة تقريباً
+        
+        # Invalidation Check (لمنع الدخول في مناطق مكسورة أو مستهلكة بشدة أو قديمة جداً)
         # إذا السعر الحالي أغلق تحت المنطقة، نعتبرها مكسورة ولا نتداول عليها
-        valid_bullish_ob = (ob_bullish_low > 0) and (close >= ob_bullish_low * 0.995)
-        valid_bearish_ob = (ob_bearish_high > 0) and (close <= ob_bearish_high * 1.005)
+        valid_bullish_ob = (ob_bullish_low > 0) and (close >= ob_bullish_low * 0.995) and (ob_bullish_age <= max_ob_age)
+        valid_bearish_ob = (ob_bearish_high > 0) and (close <= ob_bearish_high * 1.005) and (ob_bearish_age <= max_ob_age)
         
         score = 0
-        reason = "انتظار وصول السعر لمنطقة OB نشطة"
+        reason = "انتظار وصول السعر لمنطقة OB نشطة وحديثة"
         trend_result = "neutral"
         
         # 1. تقييم الاتجاه العام
@@ -156,7 +191,7 @@ class TAEngine:
                 trend_result = "buy"
                 reason = "إشارة قنص (Smart Money LONG) - السعر عند OB صاعد (Zone)"
                 optimal_entry = ob_bullish_mid # الدخول المثالي من منتصف المنطقة
-                invalidation_level = ob_bullish_low - (atr * 0.5) # الستوب أسفل المنطقة + مسافة أمان
+                invalidation_level = ob_bullish_low # الستوب يحدده الـ risk_manager ولا نضيف ATR هنا
                     
         # 3. البيع (SHORT)
         elif not is_uptrend and valid_bearish_ob:
@@ -167,9 +202,15 @@ class TAEngine:
                 trend_result = "sell"
                 reason = "إشارة قنص (Smart Money SHORT) - السعر عند OB هابط (Zone)"
                 optimal_entry = ob_bearish_mid # الدخول المثالي من منتصف المنطقة
-                invalidation_level = ob_bearish_high + (atr * 0.5) # الستوب أعلى المنطقة + مسافة أمان
+                invalidation_level = ob_bearish_high # الستوب يحدده الـ risk_manager ولا نضيف ATR هنا
                     
         if details is not None:
+            market_levels = {
+                "bearish_obs": [{"low": float(ob_bearish_low), "high": float(ob_bearish_high)}],
+                "bullish_obs": [{"low": float(ob_bullish_low), "high": float(ob_bullish_high)}],
+                "bearish_fvgs": [{"low": float(latest.get('fvg_bearish_low', 0)), "high": float(latest.get('fvg_bearish_high', 0))}],
+                "bullish_fvgs": [{"low": float(latest.get('fvg_bullish_low', 0)), "high": float(latest.get('fvg_bullish_high', 0))}],
+            }
             details.update({
                 'score': score,
                 'close': close,
@@ -179,7 +220,12 @@ class TAEngine:
                 'resistance': ob_bearish_low if pd.notna(ob_bearish_low) else 0,
                 'optimal_entry': locals().get('optimal_entry', close),
                 'invalidation_level': locals().get('invalidation_level', close),
-                'ob_mid': locals().get('optimal_entry', close) # لإستخدامها في main.py
+                'ob_mid': locals().get('optimal_entry', close), # لإستخدامها في main.py
+                'market_levels': market_levels,
+                'ema_200': ema_200,
+                'ema_50': ema_50,
+                'adx': latest.get('adx', 0),
+                'rsi': latest.get('rsi', 0)
             })
             
         return trend_result

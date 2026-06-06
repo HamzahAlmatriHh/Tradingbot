@@ -150,7 +150,7 @@ class RiskManager:
         
         # 1. تحديد وقف الخسارة
         if invalidation_level and invalidation_level > 0:
-            sl = invalidation_level - (atr * atr_sl_mult if use_atr else entry_price * 0.005) if side == 'buy' else invalidation_level + (atr * atr_sl_mult if use_atr else entry_price * 0.005)
+            sl = invalidation_level - (atr * 0.5) if side == 'buy' else invalidation_level + (atr * 0.5)
         else:
             sl = entry_price - (atr * atr_sl_mult) if side == 'buy' else entry_price + (atr * atr_sl_mult)
 

@@ -73,6 +73,16 @@ class DerivativesRiskFilter:
 
         # إذا كانت البيانات محاكاة (Mock Data) للتجريب والتدقيق
         if is_mock:
+            if getattr(Config, 'DERIVATIVES_FILTER_MODE', 'audit') == "enforce":
+                return {
+                    "decision": "BLOCK_SUGGESTED",
+                    "reason": "CoinGlass unavailable; skipping derivatives confirmation in enforce mode.",
+                    "is_mock": True,
+                    "funding_rate": 0.0,
+                    "oi_change_pct": 0.0,
+                    "long_short_ratio": 1.0,
+                    "liquidation_bias": "UNKNOWN"
+                }
             # توليد بيانات عشوائية ولكن واقعية تتماشى مع طبيعة تذبذبات السوق
             funding_rate = random.uniform(-0.0006, 0.0016)   # بين -0.06% و +0.16%
             oi_change_pct = random.uniform(-0.06, 0.09)      # بين -6% و +9%
