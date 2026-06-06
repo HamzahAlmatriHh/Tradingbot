@@ -604,6 +604,7 @@ class TelegramNotifier:
         wallet_balance = float(info.get("totalWalletBalance", usdt_available))
         total_unrealized = float(info.get("totalUnrealizedProfit", 0))
         total_margin = float(info.get("totalMarginBalance", usdt_available))
+        equity = float(info.get("totalMarginBalance", wallet_balance + total_unrealized))
 
         # لا نستبدل رصيد Binance الحقيقي بالمحفظة المرجعية
         initial = state_manager.get_initial_balance()
@@ -629,10 +630,10 @@ class TelegramNotifier:
 
         msg = "📊 <b>حالة البوت الحالية</b>\n"
         msg += "━━━━━━━━━━━━━━\n\n"
-        msg += f"💼 <b>الرصيد الإجمالي Equity:</b> <code>{wallet_balance:.2f}</code> USDT\n"
+        msg += f"💼 <b>Equity:</b> <code>{equity:.2f}</code> USDT\n"
+        msg += f"💰 <b>Wallet Balance:</b> <code>{wallet_balance:.2f}</code> USDT\n"
         msg += f"💵 <b>الرصيد المتاح:</b> <code>{float(usdt_available):.2f}</code> USDT\n"
         msg += f"📈 <b>ربح/خسارة اليوم:</b> <code>{pnl_day:+.2f}</code> USDT\n"
-        msg += f"📌 <b>الهامش/المحفظة:</b> <code>{float(total_margin):.2f}</code> USDT\n"
         msg += f"🟢 <b>الصفقات المفتوحة:</b> <code>{len(live_positions)}</code>\n"
 
         msg += "\n🧪 <b>محفظة مرجعية 50$</b>\n"

@@ -242,7 +242,16 @@ class APIStatusMonitor:
             return self._result("LunarCrush", "SKIP", reason="LUNARCRUSH_API_KEYS missing.", required=False)
 
         pool = APIKeyPool("lunarcrush", keys, self.state_manager)
-        available = pool.get_available_keys()
+        available = pool.get_available_keys(allow_exhausted=False)
+
+        if not available:
+            return self._result(
+                "LunarCrush",
+                "WARN",
+                reason="All LunarCrush keys are cooling down after rate limit.",
+                details={"keys": pool.stats()}
+            )
+
         last_reason = ""
 
         for key in available:
@@ -253,7 +262,7 @@ class APIStatusMonitor:
                     "https://lunarcrush.com/api4/public/coins/BTC/v1",
                     headers=headers,
                 )
-    
+
                 if response.status_code == 200:
                     data = response.json() if response.text else {}
                     if data.get("data"):
@@ -262,13 +271,31 @@ class APIStatusMonitor:
                     last_reason = "No data returned."
                     pool.mark_failure(key, response.status_code, last_reason)
                     continue
-    
+
+                if response.status_code == 429:
+                    pool.mark_failure(
+                        key,
+                        response.status_code,
+                        response.text[:180],
+                        cooldown_seconds=getattr(Config, "LUNARCRUSH_429_COOLDOWN_SECONDS", 600)
+                    )
+                    last_reason = "HTTP 429 Rate limit. Cooling down key."
+                    continue
+
                 pool.mark_failure(key, response.status_code, response.text[:180])
                 last_reason = f"HTTP {response.status_code}: {response.text[:180]}"
-    
+
             except Exception as e:
                 pool.mark_failure(key, 0, str(e))
                 last_reason = str(e)
+
+        if "429" in last_reason or "Rate limit" in last_reason:
+            return self._result(
+                "LunarCrush",
+                "WARN",
+                reason=f"Temporary rate limit. Last: {last_reason}",
+                details={"keys": pool.stats()}
+            )
 
         return self._result("LunarCrush", "DOWN", reason=f"All keys failed. Last: {last_reason}", details={"keys": pool.stats()})
 

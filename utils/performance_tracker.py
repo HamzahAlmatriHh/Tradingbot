@@ -30,6 +30,12 @@ class PerformanceTracker:
         "risk_pct",
         "leverage",
         "slippage",
+        "wallet_equity_at_entry",
+        "wallet_pnl_pct",
+        "reference_balance",
+        "pnl_ref_50",
+        "filter_profile",
+        "journal_dir",
     ]
 
     def __init__(self, state_manager=None, csv_path=None, starting_balance=None):
@@ -80,6 +86,10 @@ class PerformanceTracker:
                 "risk_pct",
                 "leverage",
                 "slippage",
+                "wallet_equity_at_entry",
+                "wallet_pnl_pct",
+                "reference_balance",
+                "pnl_ref_50",
             ]
             for col in numeric_cols:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)

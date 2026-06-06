@@ -133,7 +133,7 @@ def log_testnet_trade(symbol, entry_meta, exit_details):
             old_df = pd.read_csv(file_path)
             if "trade_id" in old_df.columns and trade_id in set(old_df["trade_id"].astype(str)):
                 logger.warning(f"⚠️ الصفقة {trade_id} مسجلة مسبقًا، سيتم تجاهل التكرار.")
-                return
+                return True
         except Exception as e:
             logger.warning(f"تعذر فحص تكرار الصفقة في CSV: {e}")
     
@@ -174,8 +174,10 @@ def log_testnet_trade(symbol, entry_meta, exit_details):
                 writer.writeheader()
             writer.writerow(row)
         logger.info(f"✅ تم تسجيل صفقة {symbol} في سجل الصفقات بنجاح.")
+        return True
     except Exception as e:
         logger.error(f"❌ فشل تسجيل الصفقة في الملف المحلي: {e}")
+        return False
 
 def execute_and_protect_trade(symbol, final_decision, amount, current_price, trade_leverage, trade_risk_pct, atr_val, coin_data, sentiment, bars_df, ticker, ta_trend, client, risk_manager, trailing_manager, state_manager, notifier, active_symbols, scan_results, invalidation_level=None):
     """
@@ -418,42 +420,62 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
 
 def handle_trade_close(alert, state_manager, client=None):
     """
-    معالجة إغلاق الصفقة: استخراج بيانات الدخول، حساب الانزلاق والنسبة المئوية، وتسجيل الصفقة في CSV
+    معالجة إغلاق الصفقة: لا نحذف بيانات الدخول إلا بعد نجاح التسجيل.
     """
-    symbol = alert['symbol'].split(':')[0]
-    entry_meta = state_manager.pop_entry_metadata(symbol)
-    
-    is_sl = 'STOP' in alert['type']
-    target_exit = entry_meta.get('sl') if is_sl else entry_meta.get('tp')
-    actual_exit = float(alert.get('price', 0.0))
+    symbol = alert["symbol"].split(":")[0]
+
+    # نقرأ بيانات الدخول بدون حذفها أولاً
+    entry_meta = state_manager.get_state().get("entry_metadata", {}).get(symbol, {})
+
+    if not entry_meta:
+        logger.error(f"❌ لا توجد entry_metadata للصفقة المغلقة {symbol}. لن يتم تسجيلها بدقة.")
+        return None
+
+    is_sl = "STOP" in alert["type"]
+    target_exit = entry_meta.get("sl") if is_sl else entry_meta.get("tp1") or entry_meta.get("tp")
+
+    actual_exit = float(alert.get("price", 0.0) or 0.0)
+
     slippage_exit = 0.0
-    if target_exit and target_exit > 0 and actual_exit > 0:
-        slippage_exit = abs(actual_exit - target_exit) / target_exit
-        
-    pnl_val = float(alert.get('pnl', 0.0))
+    if target_exit and float(target_exit) > 0 and actual_exit > 0:
+        slippage_exit = abs(actual_exit - float(target_exit)) / float(target_exit)
+
+    pnl_val = float(alert.get("pnl", 0.0) or 0.0)
     partial_realized = float(entry_meta.get("partial_realized_pnl", 0.0) or 0.0)
-    pnl_val = pnl_val + partial_realized
-    
-    entry_price = float(entry_meta.get('entry_price', 0.0))
-    amount = float(entry_meta.get('amount', 0.0))
-    entry_notional = entry_price * amount
+    pnl_val += partial_realized
+
+    entry_price = float(entry_meta.get("entry_price", 0.0) or 0.0)
+    amount = float(entry_meta.get("amount", 0.0) or 0.0)
+    entry_notional = abs(entry_price * amount)
+
     pnl_pct = (pnl_val / entry_notional * 100) if entry_notional > 0 else 0.0
-    
-    exit_reason = alert['type']
+
+    wallet_equity_at_entry = float(entry_meta.get("wallet_equity_at_entry", 0.0) or 0.0)
+    reference_balance = float(
+        entry_meta.get("reference_balance", getattr(Config, "REFERENCE_BALANCE", 50.0)) or 50.0
+    )
+
+    wallet_pnl_pct = (pnl_val / wallet_equity_at_entry * 100) if wallet_equity_at_entry > 0 else 0.0
+    pnl_ref_50 = (wallet_pnl_pct / 100.0) * reference_balance
+
+    exit_reason = alert["type"]
     if partial_realized != 0:
         exit_reason = f"{alert['type']} + PARTIAL_TP1"
-        
+
     exit_details = {
         "exit_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "exit_price": actual_exit,
         "pnl": pnl_val,
         "pnl_pct": pnl_pct,
+        "wallet_pnl_pct": wallet_pnl_pct,
+        "reference_balance": reference_balance,
+        "pnl_ref_50": pnl_ref_50,
         "exit_reason": exit_reason,
-        "slippage": slippage_exit
+        "slippage": slippage_exit,
     }
-    
-    log_testnet_trade(symbol, entry_meta, exit_details)
-    
+
+    logged = log_testnet_trade(symbol, entry_meta, exit_details)
+
     try:
         if client is not None:
             journal_dir = TradeJournal().finalize_trade(
@@ -466,7 +488,13 @@ def handle_trade_close(alert, state_manager, client=None):
                 logger.info(f"[TradeJournal] ملفات تحليل الصفقة محفوظة في: {journal_dir}")
     except Exception as e:
         logger.error(f"[TradeJournal] فشل إنهاء سجل الصفقة {symbol}: {e}")
-    
+
+    # نحذف metadata فقط بعد نجاح تسجيل الصفقة
+    if logged:
+        state_manager.pop_entry_metadata(symbol)
+    else:
+        logger.error(f"❌ لم يتم حذف metadata لـ {symbol} لأن التسجيل في CSV فشل.")
+
     try:
         tracker = PerformanceTracker(state_manager)
         wallet = tracker.get_wallet()
@@ -476,24 +504,22 @@ def handle_trade_close(alert, state_manager, client=None):
             f"Realized: {wallet['realized_pnl']:+.2f} USDT"
         )
     except Exception as e:
-        logger.error(f"[SimWallet] فشل تحديث المحفظة الوهمية بعد الإغلاق: {e}")
-    
+        logger.error(f"[SimWallet] فشل تحديث المحفظة بعد الإغلاق: {e}")
+
     # --- تطبيق PairLocks (التبريد بعد الخسارة) ---
     is_profit = pnl_val > 0
     consecutive_losses = state_manager.record_trade_result(symbol, is_profit)
-    
+
     if not is_profit:
         if consecutive_losses >= 3:
-            # 3 خسائر -> قفل 24 ساعة
             lock_until = datetime.now().timestamp() + (24 * 3600)
             state_manager.lock_pair(symbol, lock_until, "خسارة 3 مرات متتالية")
             logger.warning(f"🔒 [PairLocks] تم قفل {symbol} لمدة 24 ساعة بسبب 3 خسائر متتالية.")
         elif consecutive_losses >= 2:
-            # خسارتين -> قفل 4 ساعات
             lock_until = datetime.now().timestamp() + (4 * 3600)
-            state_manager.lock_pair(symbol, lock_until, "خسارة مرتين متتالية")
+            state_manager.lock_pair(symbol, lock_until, "خسارة مرتين متتاليتين")
             logger.warning(f"🔒 [PairLocks] تم قفل {symbol} لمدة 4 ساعات بسبب خسارتين متتاليتين.")
-            
+
     return exit_details
 
 def send_daily_performance_report(client, state_manager, notifier):
