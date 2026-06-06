@@ -102,8 +102,8 @@ class TrailingStopManager:
         trade = self._trades[symbol]
         side = trade['side']
         entry = trade['entry']
-        current_sl = trade['current_sl']
-        initial_sl = trade['initial_sl']
+        current_sl = trade.get('current_sl', trade.get('initial_sl', entry))
+        initial_sl = trade.get('initial_sl', current_sl)
 
         # تحديث أفضل سعر
         if side == 'buy':
