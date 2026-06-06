@@ -5,11 +5,23 @@ import requests
 from datetime import datetime
 from core.config import Config
 from core.logger import logger
+from utils.api_key_pool import APIKeyPool
 
 class DerivativesRiskFilter:
-    def __init__(self):
-        # محاولة جلب مفتاح CoinGlass من الإعدادات أو البيئة
-        self.api_key = getattr(Config, 'COINGLASS_API_KEY', os.getenv("COINGLASS_API_KEY"))
+    def __init__(self, state_manager=None):
+        self.state_manager = state_manager
+        self.api_keys = getattr(Config, "COINGLASS_API_KEYS", [])
+
+        if not self.api_keys:
+            single = getattr(Config, 'COINGLASS_API_KEY', os.getenv("COINGLASS_API_KEY"))
+            self.api_keys = [single] if single else []
+
+        self.key_pool = APIKeyPool(
+            service_name="coinglass",
+            keys=self.api_keys,
+            state_manager=state_manager
+        )
+
         self.base_url = "https://open-api.coinglass.com/public/v2"
         
     def evaluate_risk(self, symbol: str, side: str, price: float) -> dict:
@@ -33,43 +45,89 @@ class DerivativesRiskFilter:
         
         coin_name = symbol.split('/')[0]
         
-        # محاولة جلب البيانات الحقيقية من CoinGlass إذا كان المفتاح متوفراً
-        if self.api_key:
+        keys_to_try = self.key_pool.get_available_keys() if self.key_pool else self.api_keys
+
+        for api_key in keys_to_try:
+            if not api_key:
+                continue
+
             try:
                 headers = {
-                    "coinglassApiKey": self.api_key,
+                    "coinglassApiKey": api_key,
                     "accept": "application/json"
                 }
-                
-                # 1. جلب معدل التمويل (Funding Rate) والاهتمام المفتوح (Open Interest) للعملة
-                # نستخدم endpoints العامة لكوين جلاس
+
                 oi_url = f"{self.base_url}/open_interest?symbol={coin_name}"
                 response = requests.get(oi_url, headers=headers, timeout=5)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get('code') == '0' and data.get('data'):
-                        # استخلاص معدل التمويل وتغير الاهتمام المفتوح الفعلي
-                        items = data['data']
-                        if isinstance(items, list) and len(items) > 0:
-                            first_item = items[0]
-                            funding_rate = float(first_item.get('fundingRate', 0.0))
-                            oi_change_pct = float(first_item.get('h24Change', 0.0)) / 100.0  # تحويل النسبة المئوية
-                            is_mock = False
-                            
-                # 2. جلب نسبة الشراء إلى البيع (Long/Short Ratio)
+
+                if response.status_code in [401, 403, 429]:
+                    if self.key_pool:
+                        self.key_pool.mark_failure(
+                            api_key,
+                            status_code=response.status_code,
+                            reason=response.text[:200],
+                            cooldown_seconds=15 * 60 if response.status_code == 429 else 6 * 60 * 60
+                        )
+
+                    logger.warning(
+                        f"[CoinGlass] فشل المفتاح الحالي status={response.status_code}. تجربة المفتاح التالي..."
+                    )
+                    continue
+
+                if response.status_code != 200:
+                    if self.key_pool:
+                        self.key_pool.mark_failure(
+                            api_key,
+                            status_code=response.status_code,
+                            reason=response.text[:200],
+                            cooldown_seconds=5 * 60
+                        )
+                    continue
+
+                data = response.json()
+                if not (data.get('code') == '0' and data.get('data')):
+                    if self.key_pool:
+                        self.key_pool.mark_failure(
+                            api_key,
+                            status_code=200,
+                            reason=f"Unexpected CoinGlass response: {str(data)[:150]}",
+                            cooldown_seconds=5 * 60
+                        )
+                    continue
+
+                items = data['data']
+                if isinstance(items, list) and len(items) > 0:
+                    first_item = items[0]
+                    funding_rate = float(first_item.get('fundingRate', 0.0))
+                    oi_change_pct = float(first_item.get('h24Change', 0.0)) / 100.0
+                    is_mock = False
+
                 ls_url = f"{self.base_url}/long_short?symbol={coin_name}&timeframe=1h"
                 ls_response = requests.get(ls_url, headers=headers, timeout=5)
+
                 if ls_response.status_code == 200:
                     ls_data = ls_response.json()
                     if ls_data.get('code') == '0' and ls_data.get('data'):
-                        items = ls_data['data']
-                        if isinstance(items, list) and len(items) > 0:
-                            long_short_ratio = float(items[0].get('longShortRatio', 1.0))
-                            is_mock = False
-                            
+                        ls_items = ls_data['data']
+                        if isinstance(ls_items, list) and len(ls_items) > 0:
+                            long_short_ratio = float(ls_items[0].get('longShortRatio', 1.0))
+
+                if self.key_pool:
+                    self.key_pool.mark_success(api_key)
+
+                break
+
             except Exception as e:
-                logger.warning(f"⚠️ فشل جلب البيانات الحقيقية من CoinGlass لـ {symbol} (سيتم استخدام محاكاة): {e}")
+                if self.key_pool:
+                    self.key_pool.mark_failure(
+                        api_key,
+                        status_code=0,
+                        reason=str(e),
+                        cooldown_seconds=5 * 60
+                    )
+
+                logger.warning(f"[CoinGlass] خطأ مع أحد المفاتيح، تجربة المفتاح التالي: {e}")
+                continue
 
         # إذا كانت البيانات محاكاة (Mock Data) للتجريب والتدقيق
         if is_mock:

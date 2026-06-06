@@ -20,6 +20,7 @@ from utils.performance_tracker import PerformanceTracker
 from core.config import Config
 from core.universe_filter import UniverseFilter
 from filters.derivatives_risk_filter import DerivativesRiskFilter
+from utils.api_status_monitor import APIStatusMonitor
 
 def maybe_send_periodic_reports(notifier, state_manager, client=None):
     """
@@ -1337,7 +1338,16 @@ def main():
     
     last_scan_time = None
     
+    client         = ExchangeClient()
+    state_manager  = StateManager()
     notifier       = TelegramNotifier()
+    
+    api_status_monitor = APIStatusMonitor(
+        client=client,
+        state_manager=state_manager,
+        notifier=notifier
+    )
+    last_api_health_check = 0
     
     # [فحوصات الأمان المبدئية - Startup Safety Checks]
     try:
@@ -1353,10 +1363,8 @@ def main():
         notifier.send_message(f"🛑 <b>فشل في فحص بيئة التشغيل:</b>\n{e}\nتم إيقاف البوت لحماية النظام.")
         raise
         
-    client         = ExchangeClient()
     hybrid_strategy= HybridStrategy()
     risk_manager   = RiskManager()
-    state_manager  = StateManager()
     trailing_manager = TrailingStopManager(state_manager=state_manager)
     alert_manager = TradeApproachAlertManager(state_manager=state_manager, notifier=notifier)
     news_engine    = NewsEngine()
@@ -1472,6 +1480,17 @@ def main():
                 maybe_send_periodic_reports(notifier, state_manager, client)
             except Exception as e:
                 logger.error(f"خطأ أثناء وضع المراقبة بين جولات المسح: {e}")
+
+            if getattr(Config, "API_HEALTH_CHECK_ENABLED", True):
+                interval_sec = getattr(Config, "API_HEALTH_CHECK_INTERVAL_MINUTES", 60) * 60
+                if time.time() - last_api_health_check >= interval_sec:
+                    try:
+                        logger.info("🧪 بدء فحص دوري لكل خدمات API...")
+                        payload = api_status_monitor.run_full_check()
+                        api_status_monitor.notify_if_needed(payload)
+                        last_api_health_check = time.time()
+                    except Exception as e:
+                        logger.error(f"فشل الفحص الدوري لخدمات API: {e}")
 
             time.sleep(monitor_tick)
 

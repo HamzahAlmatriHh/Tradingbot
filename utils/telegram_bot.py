@@ -7,6 +7,7 @@ from html import escape
 from core.config import Config
 from core.logger import logger
 from utils.performance_tracker import PerformanceTracker
+from utils.api_status_monitor import APIStatusMonitor
 
 
 class TelegramNotifier:
@@ -96,6 +97,9 @@ class TelegramNotifier:
                 ],
                 [
                     {"text": "🩺 صحة النظام", "callback_data": "gui_health"},
+                    {"text": "🧪 فحص الخدمات", "callback_data": "gui_api_status"},
+                ],
+                [
                     {"text": "⚙️ الحد الأقصى للصفقات", "callback_data": "gui_setmax"},
                 ],
                 [
@@ -252,6 +256,17 @@ class TelegramNotifier:
         except Exception as e:
             logger.debug(f"فشل تسجيل أوامر تيليجرام: {e}")
 
+    def send_api_status_report(self, client, state_manager):
+        try:
+            monitor = APIStatusMonitor(client=client, state_manager=state_manager, notifier=self)
+            payload = monitor.run_full_check()
+            text = monitor.format_report(payload)
+            monitor.notify_if_needed(payload)
+            self.send_message(text, reply_markup=self.back_home_keyboard())
+        except Exception as e:
+            logger.error(f"فشل إرسال تقرير API Status: {e}")
+            self.send_message(f"⚠️ فشل فحص الخدمات:\n<code>{e}</code>")
+
     # ==========================================================
     # Sending / Editing Messages
     # ==========================================================
@@ -353,6 +368,9 @@ class TelegramNotifier:
 تحليل عملة محددة. مثال:
 <code>/analyze BTC</code>
 <code>/analyze ETH</code>
+
+🧪 <code>/apis</code>
+فحص حالة الخدمات والاتصال.
 
 ⚙️ <code>/setmax 5</code>
 تغيير الحد الأقصى للصفقات المفتوحة.
@@ -746,6 +764,13 @@ class TelegramNotifier:
         elif text == "/health":
             self.run_health_report(client, state_manager)
 
+        elif text in ["/apis", "/api", "/services"]:
+            self.send_message("🧪 جاري فحص كل الخدمات... انتظر قليلاً.")
+            threading.Thread(
+                target=lambda: self.send_api_status_report(client, state_manager),
+                daemon=True
+            ).start()
+
         elif text == "/stop":
             self.stop_bot(state_manager, session=session, offset=offset)
 
@@ -867,6 +892,35 @@ class TelegramNotifier:
                     self.main_menu_keyboard(),
                 )
                 self.run_health_report(client, state_manager)
+
+            elif data == "gui_api_status":
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    "🧪 <b>جاري فحص كل خدمات البوت...</b>\n"
+                    "قد يستغرق الفحص 20 إلى 60 ثانية حسب استجابة APIs.",
+                    self.main_menu_keyboard(),
+                )
+
+                def _run():
+                    try:
+                        monitor = APIStatusMonitor(
+                            client=client,
+                            state_manager=state_manager,
+                            notifier=self
+                        )
+                        payload = monitor.run_full_check()
+                        text = monitor.format_report(payload)
+                        monitor.notify_if_needed(payload)
+                        self.send_message(text, reply_markup=self.back_home_keyboard())
+                    except Exception as e:
+                        logger.error(f"فشل فحص الخدمات من تيليجرام: {e}")
+                        self.send_message(
+                            f"⚠️ فشل فحص الخدمات:\n<code>{e}</code>",
+                            reply_markup=self.back_home_keyboard()
+                        )
+
+                threading.Thread(target=_run, daemon=True).start()
 
             elif data == "gui_analyze":
                 self.edit_message(

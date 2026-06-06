@@ -31,6 +31,80 @@ class Config:
     MAX_OPEN_TRADES = 6           # تم زيادته إلى 6 صفقات في نفس الوقت
     DAILY_LOSS_LIMIT_PERCENT = 1.0 # إيقاف صارم إذا خسر 1% يومياً
 
+    # ==========================================================
+    # API Key Pools / Failover Rotation
+    # ==========================================================
+    @staticmethod
+    def _split_keys(value):
+        if not value:
+            return []
+        return [
+            k.strip()
+            for k in str(value).split(",")
+            if k and k.strip() and "your_" not in k.lower()
+        ]
+
+    @staticmethod
+    def _merge_keys(*values):
+        keys = []
+        for value in values:
+            if isinstance(value, list):
+                keys.extend(value)
+            else:
+                keys.extend(Config._split_keys(value))
+
+        # إزالة التكرار مع الحفاظ على الترتيب
+        cleaned = []
+        seen = set()
+        for key in keys:
+            if key not in seen:
+                cleaned.append(key)
+                seen.add(key)
+        return cleaned
+
+    COINGLASS_API_KEYS = _merge_keys.__func__(
+        os.getenv("COINGLASS_API_KEY"),
+        os.getenv("COINGLASS_API_KEYS")
+    )
+
+    NEWS_API_KEYS = _merge_keys.__func__(
+        os.getenv("NEWS_API_KEY"),
+        os.getenv("NEWS_API_KEYS")
+    )
+
+    CRYPTOPANIC_API_KEYS = _merge_keys.__func__(
+        os.getenv("CRYPTOPANIC_API_KEY"),
+        os.getenv("CRYPTOPANIC_API_KEYS")
+    )
+
+    GROQ_API_KEYS = _merge_keys.__func__(
+        os.getenv("GROQ_API_KEY"),
+        os.getenv("GROQ_API_KEYS")
+    )
+
+    LUNARCRUSH_API_KEYS = _merge_keys.__func__(
+        os.getenv("LUNARCRUSH_API_KEY"),
+        os.getenv("LUNARCRUSH_API_KEYS")
+    )
+
+    COINGECKO_API_KEYS = _merge_keys.__func__(
+        os.getenv("COINGECKO_API_KEY"),
+        os.getenv("COINGECKO_API_KEYS")
+    )
+
+    # [API Health Monitor]
+    API_HEALTH_CHECK_ENABLED = os.getenv("API_HEALTH_CHECK_ENABLED", "true").lower() == "true"
+    API_HEALTH_CHECK_INTERVAL_MINUTES = int(os.getenv("API_HEALTH_CHECK_INTERVAL_MINUTES", 60))
+    API_HEALTH_ALERT_COOLDOWN_MINUTES = int(os.getenv("API_HEALTH_ALERT_COOLDOWN_MINUTES", 60))
+    API_HEALTH_TIMEOUT_SECONDS = int(os.getenv("API_HEALTH_TIMEOUT_SECONDS", 15))
+    API_HEALTH_NOTIFY_WARNINGS = os.getenv("API_HEALTH_NOTIFY_WARNINGS", "true").lower() == "true"
+
+    # Railway API اختياري، لا تستخدمه إلا إذا قررت إدارة Variables برمجياً لاحقاً
+    RAILWAY_API_TOKEN = os.getenv("RAILWAY_API_TOKEN")
+    RAILWAY_PROJECT_ID = os.getenv("RAILWAY_PROJECT_ID")
+    RAILWAY_ENVIRONMENT_ID = os.getenv("RAILWAY_ENVIRONMENT_ID")
+    RAILWAY_SERVICE_ID = os.getenv("RAILWAY_SERVICE_ID")
+
     # [إعدادات فلتر أمان السوق - Universe Filter]
     MIN_24H_VOLUME_USDT = 10_000_000 # الحد الأدنى لحجم التداول 10M USDT
     MAX_SPREAD_PCT = 0.001           # الحد الأقصى للسبريد 0.10%
