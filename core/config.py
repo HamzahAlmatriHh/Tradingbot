@@ -28,7 +28,7 @@ class Config:
     TRADE_SYMBOL = "BTC/USDT"
     RISK_PER_TRADE_PERCENT = 0.25 # تم التخفيض بناءً على مراجعة الأمان
     LEVERAGE = 1                  # رافعة مالية 1x (بدون رافعة فعلية) للنسخة الحية
-    MAX_OPEN_TRADES = 1           # صفقة واحدة فقط في نفس الوقت
+    MAX_OPEN_TRADES = 6           # تم زيادته إلى 6 صفقات في نفس الوقت
     DAILY_LOSS_LIMIT_PERCENT = 1.0 # إيقاف صارم إذا خسر 1% يومياً
 
     # [إعدادات فلتر أمان السوق - Universe Filter]
@@ -53,7 +53,7 @@ class Config:
     # [إعدادات Testnet التفصيلية]
     TESTNET_DEBUG_MODE = True
     TESTNET_RELAXED_ENTRY = True
-    TESTNET_MAX_OPEN_TRADES = 1
+    TESTNET_MAX_OPEN_TRADES = 6
     TESTNET_RISK_MULTIPLIER = 1.0
     
     # ملاحظة هامة: هذا الشرط يعمل فقط في وضع التجريبي (Testnet) لمحاكاة محفظة صغيرة (مثلاً 50$). 

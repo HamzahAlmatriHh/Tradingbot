@@ -88,12 +88,7 @@ class TelegramNotifier:
                     {"text": "🧠 تحليل عملة", "callback_data": "gui_analyze"},
                 ],
                 [
-                    {"text": "📆 تقرير يومي", "callback_data": "report_daily"},
-                    {"text": "🗓️ تقرير أسبوعي", "callback_data": "report_weekly"},
-                ],
-                [
-                    {"text": "📅 تقرير شهري", "callback_data": "report_monthly"},
-                    {"text": "🏆 تقرير سنوي", "callback_data": "report_yearly"},
+                    {"text": "📋 التقارير والأداء", "callback_data": "gui_reports_menu"},
                 ],
                 [
                     {"text": "🩺 صحة النظام", "callback_data": "gui_health"},
@@ -136,6 +131,26 @@ class TelegramNotifier:
                 [
                     {"text": "✍️ إدخال يدوي", "callback_data": "gui_analyze_manual"},
                     {"text": "🏠 الرئيسية", "callback_data": "gui_home"},
+                ],
+            ]
+        }
+
+    def reports_menu_keyboard(self):
+        """
+        قائمة التقارير الفرعية.
+        """
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "📆 تقرير يومي", "callback_data": "report_daily"},
+                    {"text": "🗓️ تقرير أسبوعي", "callback_data": "report_weekly"},
+                ],
+                [
+                    {"text": "📅 تقرير شهري", "callback_data": "report_monthly"},
+                    {"text": "🏆 تقرير سنوي", "callback_data": "report_yearly"},
+                ],
+                [
+                    {"text": "🏠 الرجوع للرئيسية", "callback_data": "gui_home"},
                 ],
             ]
         }
@@ -762,6 +777,14 @@ class TelegramNotifier:
         try:
             if data == "gui_home":
                 self.edit_message(chat_id, message_id, self.welcome_text(), self.main_menu_keyboard())
+
+            elif data == "gui_reports_menu":
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    "📋 <b>قائمة التقارير والأداء:</b>\nاختر نوع التقرير الذي تريد عرضه:",
+                    self.reports_menu_keyboard()
+                )
 
             elif data == "gui_help":
                 self.edit_message(chat_id, message_id, self.help_text(), self.main_menu_keyboard())
