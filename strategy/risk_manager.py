@@ -12,30 +12,24 @@ class RiskManager:
 
     def calculate_position_size(self, balance: float, current_price: float, custom_risk_percent: float = None, atr: float = None, sl: float = None):
         """
-        حساب الكمية بناءً على نسبة المخاطرة والمسافة الحقيقية للستوب (Live SL Distance)
+        حساب الكمية بنظام الهامش الثابت (Fixed Margin): استخدام نسبة من المحفظة كضمان للصفقة وضربها في الرافعة المالية.
         """
         if not balance or balance <= 0 or not current_price or current_price <= 0:
             return 0
             
         risk_pct = custom_risk_percent if custom_risk_percent is not None else self.risk_percent
-        risk_amount = balance * risk_pct
         
-        # حساب المخاطرة لكل وحدة (Live Stop Loss Distance)
-        if sl and sl > 0 and sl != current_price:
-            loss_per_unit = abs(current_price - sl)
-        else:
-            use_atr = getattr(Config, 'USE_ATR_TARGETS', False) and atr is not None and atr > 0
-            if use_atr:
-                atr_sl_mult = getattr(Config, 'ATR_SL_MULTIPLIER', 1.5)
-                loss_per_unit = atr * atr_sl_mult
-            else:
-                loss_per_unit = current_price * 0.02
-            
-        if loss_per_unit <= 0:
-            loss_per_unit = current_price * 0.02
-            
-        amount = risk_amount / loss_per_unit
-        logger.info(f"حساب المخاطرة: رصيد={balance:.2f}, مخاطرة مسموحة={risk_amount:.2f}$, كمية={amount:.6f}")
+        # حساب الهامش المخصص للصفقة (Margin) بناءً على نسبة من المحفظة
+        margin_per_trade = balance * risk_pct
+        
+        # حساب الحجم الإجمالي للصفقة (Notional Size) باستخدام الرافعة المالية
+        leverage = getattr(Config, 'LEVERAGE', 10)
+        notional_size = margin_per_trade * leverage
+        
+        # حساب كمية العملة المطلوبة
+        amount = notional_size / current_price
+        
+        logger.info(f"حساب الكمية (Fixed Margin): رصيد={balance:.2f}$, هامش مستخدم={margin_per_trade:.2f}$, رافعة={leverage}x, حجم الصفقة={notional_size:.2f}$, كمية={amount:.6f}")
         return amount
 
     def calculate_trade_plan(self, side: str, entry: float, sl: float, market_levels: dict, min_rr: float = None):

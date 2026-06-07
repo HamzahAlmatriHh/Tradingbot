@@ -173,6 +173,9 @@ class TelegramNotifier:
                     {"text": "🏆 تقرير سنوي", "callback_data": "report_yearly"},
                 ],
                 [
+                    {"text": "📥 تحميل شمعات اليوم (CSV)", "callback_data": "download_candle_logs"},
+                ],
+                [
                     {"text": "🏠 الرجوع للرئيسية", "callback_data": "gui_home"},
                 ],
             ]
@@ -393,6 +396,98 @@ class TelegramNotifier:
             logger.info("تم إرسال إشعار تيليجرام بنجاح.")
         return success
 
+    def send_document(self, file_path: str, caption: str = ""):
+        """
+        إرسال ملف/مستند عبر تيليجرام.
+        """
+        if not self._is_configured():
+            logger.debug("إعدادات تيليجرام غير مكتملة، تم تخطي إرسال المستند.")
+            return False
+
+        if not os.path.exists(file_path):
+            logger.error(f"المستند المطلوب إرساله غير موجود: {file_path}")
+            return False
+
+        url = f"{self.base_url}/sendDocument"
+        try:
+            with open(file_path, 'rb') as f:
+                files = {'document': f}
+                payload = {
+                    'chat_id': self.chat_id,
+                    'caption': caption,
+                    'parse_mode': 'HTML'
+                }
+                response = requests.post(url, data=payload, files=files, timeout=30)
+                response.raise_for_status()
+                logger.info(f"تم إرسال المستند {file_path} بنجاح.")
+                return True
+        except Exception as e:
+            logger.error(f"فشل إرسال المستند {file_path} عبر تيليجرام: {e}")
+            return False
+
+    def send_today_candle_logs(self):
+        """
+        تتجميع وإرسال ملف zip يحتوي على سجلات الشموع والصفقات لليوم الحالي.
+        """
+        import zipfile
+        import tempfile
+        from datetime import datetime
+
+        journal_dir = getattr(Config, "TRADE_JOURNAL_DIR", "trade_journal")
+        if not os.path.exists(journal_dir):
+            self.send_message("❌ لا يوجد مجلد لسجلات الصفقات (trade_journal) بعد. يبدو أنه لم يتم فتح أي صفقات حتى الآن.")
+            return False
+
+        today_str = datetime.now().strftime("%Y%m%d")
+
+        # البحث عن المجلدات التابعة لليوم
+        today_folders = []
+        for d in os.listdir(journal_dir):
+            full_path = os.path.join(journal_dir, d)
+            if os.path.isdir(full_path) and d.startswith(today_str):
+                today_folders.append(full_path)
+
+        if not today_folders:
+            self.send_message("ℹ️ لا توجد صفقات منفذة ومسجلة لليوم حتى الآن لجمع شمعاتها.")
+            return False
+
+        # إشعار البدء بالتحضير
+        self.send_message("⏳ جاري ضغط شمعات وسجلات صفقات اليوم لإرسالها...")
+
+        # إنشاء ملف مضغوط مؤقت
+        zip_filename = f"candles_report_{today_str}.zip"
+        temp_dir = tempfile.gettempdir()
+        zip_path = os.path.join(temp_dir, zip_filename)
+
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for folder in today_folders:
+                    for root, dirs, files in os.walk(folder):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            # الحفاظ على الهيكل التنظيمي للمجلدات داخل الملف المضغوط
+                            arcname = os.path.relpath(file_path, start=journal_dir)
+                            zipf.write(file_path, arcname)
+
+            # إرسال الملف المضغوط
+            caption = f"📦 <b>سجل شمعات صفقات اليوم ({datetime.now().strftime('%Y-%m-%d')})</b>\nيحتوي الملف على شمعات (1m, 5m, 15m) ومبررات الدخول والخروج لكل صفقة."
+            success = self.send_document(zip_path, caption=caption)
+            if not success:
+                self.send_message("❌ فشل إرسال الملف المضغوط. يرجى التحقق من سجلات البوت.")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"خطأ أثناء ضغط وإرسال شمعات اليوم: {e}")
+            self.send_message(f"❌ حدث خطأ أثناء إعداد الملف المضغوط: {e}")
+            return False
+        finally:
+            # تنظيف الملف المؤقت
+            if os.path.exists(zip_path):
+                try:
+                    os.remove(zip_path)
+                except Exception:
+                    pass
+
     def edit_message(self, chat_id, message_id, text: str, reply_markup: dict = None):
         """
         تعديل رسالة موجودة عند الضغط على الأزرار.
@@ -569,8 +664,9 @@ class TelegramNotifier:
 📊 <b>النسبة للمحفظة الفعلية:</b> <code>{float(wallet_pnl_pct):+.2f}%</code>
 
 🧪 <b>تأثير المحفظة المرجعية ({reference_balance}$):</b>
-• <b>مبلغ التأثير:</b> <code>{float(pnl_ref_50):+.4f} USDT</code>
-• <b>النسبة من ({reference_balance}$):</b> <code>{float(wallet_pnl_pct):+.2f}%</code>
+ملاحظة: لو كانت محفظتك الحقيقية {reference_balance}$ فقط، لكان:
+• <b>الربح/الخسارة:</b> <code>{float(pnl_ref_50):+.4f} USDT</code>
+• <b>النمو/التراجع:</b> <code>{float(wallet_pnl_pct):+.2f}%</code>
 """
 
         keyboard = {
@@ -950,6 +1046,9 @@ class TelegramNotifier:
                     reply_markup=self.analyze_keyboard(),
                 )
 
+        elif text in ["/candles", "/getcandles", "/getlogs"]:
+            self.send_today_candle_logs()
+
         else:
             self.send_message(
                 "لم أفهم الأمر. افتح القائمة الرئيسية واختر من الأزرار 👇",
@@ -1023,6 +1122,10 @@ class TelegramNotifier:
                     reply_markup=self.back_home_keyboard()
                 )
                 self.answer_callback(callback_id, "تم إنشاء التقرير ✅")
+
+            elif data == "download_candle_logs":
+                self.send_today_candle_logs()
+                self.answer_callback(callback_id, "تم إرسال الملف ✅")
 
             elif data == "gui_health":
                 self.edit_message(

@@ -84,9 +84,20 @@ def maybe_send_periodic_reports(notifier, state_manager, client=None):
         send_report("yearly")
 
 
-def get_wallet_equity_snapshot(client):
+def get_wallet_equity_snapshot(client, state_manager=None):
     try:
         if client is None: return 0.0, 0.0
+        
+        simulated_cap = getattr(Config, "TESTNET_SIMULATED_BALANCE", 0)
+        if getattr(Config, "USE_TESTNET", False) and simulated_cap > 0 and state_manager is not None:
+            bal = client.get_balance()
+            info = bal.get("info", {}) if bal else {}
+            total_unrealized = float(info.get("totalUnrealizedProfit", 0) or 0)
+            
+            tracker = PerformanceTracker(state_manager)
+            sim_wallet = tracker.get_wallet(unrealized_pnl=total_unrealized)
+            return float(sim_wallet["equity"]), float(sim_wallet["available"])
+
         bal = client.get_balance()
         info = bal.get("info", {}) if bal else {}
 
@@ -296,7 +307,7 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
         
         try:
             latest_bar = bars_df.iloc[-2] if bars_df is not None and len(bars_df) > 1 else {}
-            wallet_equity_at_entry, wallet_available_at_entry = get_wallet_equity_snapshot(client)
+            wallet_equity_at_entry, wallet_available_at_entry = get_wallet_equity_snapshot(client, state_manager=state_manager)
             reference_balance = float(getattr(Config, "REFERENCE_BALANCE", 50.0))
 
             entry_meta = {
