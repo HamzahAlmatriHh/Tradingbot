@@ -330,6 +330,30 @@ class TelegramNotifier:
         except Exception as e:
             logger.debug(f"فشل تسجيل أوامر تيليجرام: {e}")
 
+        # ضبط زر القائمة السفلي ليفتح Mini App مباشرة (مثل زر Play)
+        self._set_webapp_menu_button()
+
+    def _set_webapp_menu_button(self):
+        """
+        يستبدل زر 'Menu' السفلي بزر يفتح Mini App مباشرة.
+        النتيجة: ظهور زر 'لوحة التحكم' أسفل المحادثة مثل زر Play في Hamster Kombat.
+        """
+        if not self._is_configured():
+            return
+        payload = {
+            "menu_button": {
+                "type": "web_app",
+                "text": "🖥️ لوحة التحكم",
+                "web_app": {"url": "https://tradingbot-production-0b71.up.railway.app/"}
+            }
+        }
+        try:
+            requests.post(f"{self.base_url}/setChatMenuButton", json=payload, timeout=5)
+            logger.info("[WebApp] تم ضبط زر Mini App كزر القائمة الرئيسي بنجاح.")
+        except Exception as e:
+            logger.debug(f"[WebApp] فشل ضبط زر Mini App: {e}")
+
+
     def send_api_status_report(self, client, state_manager):
         try:
             monitor = APIStatusMonitor(client=client, state_manager=state_manager, notifier=self)
