@@ -96,6 +96,12 @@ class TelegramNotifier:
         return {
             "inline_keyboard": [
                 [
+                    {
+                        "text": "🖥️ لوحة التحكم الذكية",
+                        "web_app": {"url": "https://tradingbot-production-0b71.up.railway.app/"}
+                    },
+                ],
+                [
                     {"text": "📊 حالة البوت", "callback_data": "gui_status"},
                     {"text": "🧠 تحليل عملة", "callback_data": "gui_analyze"},
                 ],

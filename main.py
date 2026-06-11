@@ -2,6 +2,7 @@ import time
 import os
 import csv
 import threading
+import math
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -18,12 +19,14 @@ from strategy.alert_manager import TradeApproachAlertManager
 from utils.telegram_bot import TelegramNotifier
 from utils.state_manager import StateManager
 from utils.performance_tracker import PerformanceTracker
+from utils.candle_sync import seconds_to_next_candle
 from core.config import Config
 from core.universe_filter import UniverseFilter
 from filters.derivatives_risk_filter import DerivativesRiskFilter
 from utils.api_status_monitor import APIStatusMonitor
 from strategy.filter_profiles import get_filter_profile
 from utils.trade_journal import TradeJournal
+from webapp.server import start_webapp
 
 def maybe_send_periodic_reports(notifier, state_manager, client=None):
     """
@@ -1856,8 +1859,16 @@ def main():
     
     # تشغيل نظام الاستماع لأوامر التيليجرام في الخلفية
     notifier.start_polling(client, state_manager, ai_engine, ta_engine, news_engine, social_engine)
-    
-    logger.info("🔄 جاري مزامنة الصفقات المفتوحة مع منصة باينانس...")
+
+    # تشغيل خادم Mini App (Flask) على port 8080 في خيط daemon منفصل
+    try:
+        webapp_port = int(os.getenv("PORT", "8080"))
+        start_webapp(state_manager=state_manager, port=webapp_port)
+    except Exception as e:
+        logger.warning(f"[WebApp] تعذر تشغيل خادم Mini App: {e}")
+
+    logger.info("جاري مزامنة الصفقات المفتوحة مع منصة باينانس...")
+
     try:
         live_positions = client.exchange.fetch_positions()
         live_symbols = set()
@@ -1918,7 +1929,7 @@ def main():
         scan_interval = int(
             state_manager.get(
                 "scan_interval_seconds",
-                getattr(Config, "SCAN_INTERVAL_SECONDS", 600)
+                getattr(Config, "SCAN_INTERVAL_SECONDS", 900)
             )
         )
 
@@ -1927,14 +1938,23 @@ def main():
             min(scan_interval, getattr(Config, "MAX_SCAN_INTERVAL_SECONDS", 3600))
         )
 
+        # مزامنة ذكية مع إغلاق الشمعة (بديل time.sleep العشوائي)
+        candle_wait = seconds_to_next_candle(
+            interval_seconds=scan_interval,
+            buffer_seconds=10
+        )
+
+
         monitor_tick = getattr(Config, "MONITOR_TICK_SECONDS", 10)
 
         logger.info(
-            f"⏳ انتهت جولة المسح. مراقبة مستمرة لمدة {scan_interval} ثانية "
-            f"قبل الجولة التالية..."
+            f"[CandleSync] انتهت جولة المسح. الانتظار حتى اغلاق الشمعة التالية "
+            f"({candle_wait:.0f}s)..."
         )
 
-        end_time = time.time() + scan_interval
+        # نستخدم candle_wait بدلاً من scan_interval الثابت
+        end_time = time.time() + candle_wait
+
         
         # وقت آخر فحص للصفقات المفتوحة (دقيق لتجنب فجوات الوقت)
         monitor_last_time = int(time.time() * 1000)

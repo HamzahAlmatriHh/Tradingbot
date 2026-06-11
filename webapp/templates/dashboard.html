@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>حمزاوي || Trader — لوحة التحكم</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:        #0d0f14;
+      --surface:   #151820;
+      --surface2:  #1c2030;
+      --border:    rgba(255,255,255,.07);
+      --accent:    #7c6ef9;
+      --accent2:   #5eead4;
+      --green:     #34d399;
+      --red:       #f87171;
+      --yellow:    #fbbf24;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --radius:    14px;
+      --shadow:    0 4px 24px rgba(0,0,0,.4);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Cairo', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      font-size: 14px;
+    }
+
+    /* ───── Header ───── */
+    .header {
+      background: linear-gradient(135deg, #1a1d2e 0%, #151820 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(12px);
+    }
+    .header-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .bot-avatar {
+      width: 38px; height: 38px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+      box-shadow: 0 0 16px rgba(124,110,249,.4);
+    }
+    .header h1 { font-size: 15px; font-weight: 700; }
+    .header-sub { font-size: 11px; color: var(--muted); }
+    .status-pill {
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(52,211,153,.12);
+      border: 1px solid rgba(52,211,153,.25);
+      color: var(--green);
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      background: var(--green);
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%,100% { opacity: 1; }
+      50%      { opacity: .4; }
+    }
+
+    /* ───── Content ───── */
+    .content { padding: 14px 14px 80px; }
+
+    /* ───── Stats Grid ───── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      position: relative;
+      overflow: hidden;
+      transition: transform .2s;
+    }
+    .stat-card:active { transform: scale(.97); }
+    .stat-card::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+    }
+    .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .stat-value { font-size: 22px; font-weight: 900; }
+    .stat-sub   { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .green  { color: var(--green); }
+    .red    { color: var(--red); }
+    .accent { color: var(--accent); }
+    .accent2{ color: var(--accent2); }
+
+    /* ───── Wallet Card ───── */
+    .wallet-card {
+      background: linear-gradient(135deg, #1e1f35 0%, #151820 100%);
+      border: 1px solid rgba(124,110,249,.25);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow);
+    }
+    .wallet-card h3 {
+      font-size: 12px; color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin-bottom: 12px;
+    }
+    .wallet-row {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 8px;
+    }
+    .wallet-row:last-child { margin-bottom: 0; }
+    .wallet-label { font-size: 13px; color: var(--muted); }
+    .wallet-value { font-size: 15px; font-weight: 700; }
+    .wallet-big   { font-size: 28px; font-weight: 900; color: var(--accent2); }
+    .balance-row  { margin-bottom: 14px; }
+
+    /* ───── Section title ───── */
+    .section-title {
+      font-size: 13px; font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin: 16px 0 8px;
+      display: flex; align-items: center; gap: 6px;
+    }
+
+    /* ───── Chart ───── */
+    .chart-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .chart-card canvas { max-height: 160px; }
+
+    /* ───── Positions ───── */
+    .position-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .pos-badge {
+      width: 40px; height: 40px;
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700;
+      flex-shrink: 0;
+    }
+    .pos-badge.long { background: rgba(52,211,153,.15); color: var(--green); border: 1px solid rgba(52,211,153,.3); }
+    .pos-badge.short { background: rgba(248,113,113,.15); color: var(--red); border: 1px solid rgba(248,113,113,.3); }
+    .pos-info { flex: 1; }
+    .pos-symbol { font-size: 14px; font-weight: 700; }
+    .pos-detail { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .pos-pnl { text-align: left; font-size: 13px; font-weight: 700; }
+    .empty-state {
+      text-align: center;
+      color: var(--muted);
+      padding: 20px;
+      font-size: 13px;
+    }
+    .empty-state .emoji { font-size: 28px; display: block; margin-bottom: 6px; }
+
+    /* ───── Trade Table ───── */
+    .trade-table { width: 100%; border-collapse: collapse; }
+    .trade-table th {
+      font-size: 10px;
+      color: var(--muted);
+      text-align: right;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+    }
+    .trade-table td {
+      font-size: 12px;
+      padding: 10px 8px;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+      vertical-align: middle;
+    }
+    .trade-table tr:last-child td { border-bottom: none; }
+    .trade-table tr:hover td { background: rgba(255,255,255,.03); }
+    .badge {
+      display: inline-flex; align-items: center;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .badge.buy  { background: rgba(52,211,153,.15); color: var(--green); }
+    .badge.sell { background: rgba(248,113,113,.15); color: var(--red); }
+
+    /* ───── Refresh Bar ───── */
+    .refresh-bar {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: rgba(21,24,32,.95);
+      border-top: 1px solid var(--border);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      backdrop-filter: blur(12px);
+      z-index: 99;
+    }
+    .refresh-time { font-size: 11px; color: var(--muted); }
+    .refresh-btn {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border: none;
+      color: #fff;
+      padding: 8px 20px;
+      border-radius: 8px;
+      font-family: 'Cairo', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+    .refresh-btn:active { opacity: .8; }
+
+    /* ───── Loading spinner ───── */
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+      margin: 60px auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .loading-wrap { text-align: center; color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-title">
+    <div class="bot-avatar">🤖</div>
+    <div>
+      <div class="header h1">حمزاوي || Trader</div>
+      <div class="header-sub">لوحة التداول الذكية</div>
+    </div>
+  </div>
+  <div class="status-pill">
+    <div class="status-dot"></div>
+    نشط
+  </div>
+</div>
+
+<!-- Content -->
+<div class="content" id="app">
+  <div class="loading-wrap">
+    <div class="spinner"></div>
+    <div>جاري تحميل البيانات...</div>
+  </div>
+</div>
+
+<!-- Refresh Bar -->
+<div class="refresh-bar">
+  <span class="refresh-time" id="lastUpdate">آخر تحديث: —</span>
+  <button class="refresh-btn" onclick="loadDashboard()">🔄 تحديث</button>
+</div>
+
+<script>
+  // ─── Telegram Web App Init ───
+  const tg = window.Telegram?.WebApp;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    document.body.style.background = tg.themeParams?.bg_color || '#0d0f14';
+  }
+
+  let chart = null;
+
+  // ─── Helpers ───
+  const fmt = (v, d=4) => (typeof v === 'number' ? v.toFixed(d) : '0');
+  const fmtPnl = v => {
+    const n = parseFloat(v);
+    return (n >= 0 ? '+' : '') + n.toFixed(4);
+  };
+
+  // ─── Load Data ───
+  async function loadDashboard() {
+    try {
+      const res  = await fetch('/api/dashboard');
+      const data = await res.json();
+      renderDashboard(data);
+      document.getElementById('lastUpdate').textContent = 'آخر تحديث: ' + data.updated_at;
+    } catch(e) {
+      document.getElementById('app').innerHTML =
+        '<div class="empty-state"><span class="emoji">⚠️</span>تعذر تحميل البيانات</div>';
+    }
+  }
+
+  // ─── Render ───
+  function renderDashboard(data) {
+    const s = data.stats;
+    const w = data.wallet || {};
+    const pnlClass = s.total_pnl >= 0 ? 'green' : 'red';
+    const pfClass  = s.profit_factor >= 1.5 ? 'green' : (s.profit_factor >= 1 ? 'yellow' : 'red');
+
+    let html = `
+    <!-- Stats Grid -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">إجمالي الصفقات</div>
+        <div class="stat-value accent">${s.total}</div>
+        <div class="stat-sub">✅ ${s.wins} &nbsp; ❌ ${s.losses}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">نسبة الفوز</div>
+        <div class="stat-value ${s.win_rate >= 50 ? 'green' : 'red'}">${s.win_rate}%</div>
+        <div class="stat-sub">الهدف: > 50%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">صافي الربح</div>
+        <div class="stat-value ${pnlClass}">${fmtPnl(s.total_pnl)}</div>
+        <div class="stat-sub">USDT</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Profit Factor</div>
+        <div class="stat-value ${pfClass}">${s.profit_factor >= 999 ? '∞' : s.profit_factor}</div>
+        <div class="stat-sub">الهدف: > 1.5</div>
+      </div>
+    </div>`;
+
+    // Wallet Card
+    const wb = parseFloat(w.wallet_balance || data.ref_balance || 50);
+    const rp = parseFloat(w.realized_pnl || 0);
+    const tr = parseFloat(w.total_return_pct || 0);
+    const trClass = tr >= 0 ? 'green' : 'red';
+    html += `
+    <div class="wallet-card">
+      <h3>💼 المحفظة التجريبية</h3>
+      <div class="balance-row">
+        <div class="stat-label">رصيد المحفظة</div>
+        <div class="wallet-big">${wb.toFixed(4)} <small style="font-size:14px;color:var(--muted)">USDT</small></div>
+      </div>
+      <div class="wallet-row">
+        <span class="wallet-label">PNL المحقق</span>
+        <span class="wallet-value ${rp >= 0 ? 'green' : 'red'}">${fmtPnl(rp)} USDT</span>
+      </div>
+      <div class="wallet-row">
+        <span class="wallet-label">العائد الكلي</span>
+        <span class="wallet-value ${trClass}">${tr >= 0 ? '+' : ''}${tr.toFixed(2)}%</span>
+      </div>
+      <div class="wallet-row">
+        <span class="wallet-label">أفضل صفقة</span>
+        <span class="wallet-value green">+${parseFloat(s.best_trade || 0).toFixed(4)} USDT</span>
+      </div>
+      <div class="wallet-row">
+        <span class="wallet-label">أسوأ صفقة</span>
+        <span class="wallet-value red">${parseFloat(s.worst_trade || 0).toFixed(4)} USDT</span>
+      </div>
+    </div>`;
+
+    // Chart
+    html += `
+    <div class="section-title">📈 منحنى الربح (آخر 30 صفقة)</div>
+    <div class="chart-card">
+      <canvas id="pnlChart"></canvas>
+    </div>`;
+
+    // Open Positions
+    html += `<div class="section-title">⚡ الصفقات المفتوحة (${data.open_positions.length})</div>`;
+    if (data.open_positions.length === 0) {
+      html += `<div class="empty-state"><span class="emoji">😴</span>لا توجد صفقات مفتوحة الآن</div>`;
+    } else {
+      data.open_positions.forEach(p => {
+        const isLong  = p.side === 'BUY' || p.side === 'LONG';
+        const cls     = isLong ? 'long' : 'short';
+        const label   = isLong ? 'LONG' : 'SHORT';
+        const coin    = p.symbol.split('/')[0];
+        html += `
+        <div class="position-card">
+          <div class="pos-badge ${cls}">${label}</div>
+          <div class="pos-info">
+            <div class="pos-symbol">${p.symbol}</div>
+            <div class="pos-detail">
+              دخول: ${parseFloat(p.entry_price).toFixed(4)} &nbsp;|&nbsp;
+              SL: <span class="red">${parseFloat(p.sl).toFixed(4)}</span> &nbsp;|&nbsp;
+              TP: <span class="green">${parseFloat(p.tp).toFixed(4)}</span>
+            </div>
+            <div class="pos-detail" style="margin-top:2px;color:var(--muted)">${p.entry_time}</div>
+          </div>
+          ${p.partial_done ? '<div style="font-size:10px;color:var(--yellow);text-align:left">TP1 ✅</div>' : ''}
+        </div>`;
+      });
+    }
+
+    // Trades History
+    html += `<div class="section-title">📋 آخر الصفقات</div>
+    <div class="chart-card" style="padding:0;overflow:auto">
+    <table class="trade-table">
+      <thead>
+        <tr>
+          <th>الزوج</th>
+          <th>النوع</th>
+          <th>الدخول</th>
+          <th>PNL</th>
+          <th>ROE</th>
+        </tr>
+      </thead>
+      <tbody>`;
+
+    data.trades.slice(0, 20).forEach(t => {
+      const isLong = t.side === 'BUY' || t.side === 'LONG';
+      const pnlC   = t.pnl >= 0 ? 'green' : 'red';
+      const result = t.pnl >= 0 ? '✅' : '❌';
+      html += `
+        <tr>
+          <td>
+            <div style="font-weight:700">${result} ${t.symbol.split('/')[0]}</div>
+            <div style="font-size:10px;color:var(--muted)">${t.exit_time}</div>
+          </td>
+          <td><span class="badge ${isLong ? 'buy' : 'sell'}">${isLong ? 'LONG' : 'SHORT'}</span></td>
+          <td style="font-size:11px">${parseFloat(t.entry_price).toFixed(4)}</td>
+          <td class="${pnlC}" style="font-weight:700">${fmtPnl(t.pnl)}</td>
+          <td class="${parseFloat(t.roe_pct) >= 0 ? 'green' : 'red'}" style="font-size:11px">
+            ${parseFloat(t.roe_pct) >= 0 ? '+' : ''}${parseFloat(t.roe_pct).toFixed(1)}%
+          </td>
+        </tr>`;
+    });
+
+    html += `</tbody></table></div>`;
+
+    document.getElementById('app').innerHTML = html;
+
+    // Draw Chart
+    const ctx = document.getElementById('pnlChart');
+    if (ctx && data.chart && data.chart.labels.length > 0) {
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: data.chart.labels,
+          datasets: [{
+            label: 'PNL تراكمي',
+            data: data.chart.cumulative,
+            fill: true,
+            backgroundColor: 'rgba(124,110,249,.12)',
+            borderColor: '#7c6ef9',
+            borderWidth: 2,
+            pointRadius: 3,
+            pointBackgroundColor: data.chart.bar_colors,
+            tension: 0.4,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: {
+              ticks: { color: '#64748b', font: { size: 10 }, maxRotation: 0 },
+              grid:  { color: 'rgba(255,255,255,.04)' },
+            },
+            y: {
+              ticks: { color: '#64748b', font: { size: 10 } },
+              grid:  { color: 'rgba(255,255,255,.06)' },
+            },
+          },
+        },
+      });
+    }
+  }
+
+  // ─── Auto refresh every 30s ───
+  loadDashboard();
+  setInterval(loadDashboard, 30_000);
+</script>
+</body>
+</html>
