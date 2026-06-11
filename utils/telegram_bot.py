@@ -97,7 +97,7 @@ class TelegramNotifier:
             "inline_keyboard": [
                 [
                     {
-                        "text": "📊 لوحة التحكم الذكية — افتح",
+                        "text": "🚀 Open Dashboard",
                         "web_app": {"url": "https://tradingbot-production-0b71.up.railway.app/"}
                     },
                 ],
@@ -343,7 +343,7 @@ class TelegramNotifier:
         payload = {
             "menu_button": {
                 "type": "web_app",
-                "text": "📊 لوحة التحكم",
+                "text": "Open",
                 "web_app": {"url": "https://tradingbot-production-0b71.up.railway.app/"}
             }
         }

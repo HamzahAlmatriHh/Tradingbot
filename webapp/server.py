@@ -4,7 +4,6 @@ Telegram Mini App — Flask Dashboard Server
 """
 import os
 import json
-import math
 import threading
 import pandas as pd
 from flask import Flask, jsonify, render_template
@@ -21,7 +20,127 @@ def init_webapp(state_manager=None):
     _state_manager = state_manager
 
 # ------------------------------------------------------------------
-# Data helpers
+# Live Binance API helpers (بيانات حقيقية من باينانس مباشرة)
+# ------------------------------------------------------------------
+
+def _get_live_wallet() -> dict:
+    """
+    يجلب الرصيد الحقيقي من باينانس (Testnet أو Live).
+    هذا هو الرصيد الفعلي في حسابك — لا رقم وهمي.
+    """
+    try:
+        import ccxt
+        use_testnet = os.getenv("USE_TESTNET", "True").lower() in ("true", "1", "yes")
+        exchange = ccxt.binanceusdm({
+            "apiKey":  os.getenv("BINANCE_API_KEY", ""),
+            "secret":  os.getenv("BINANCE_API_SECRET", ""),
+            "options": {"defaultType": "future"},
+        })
+        if use_testnet:
+            exchange.set_sandbox_mode(True)
+
+        balance = exchange.fetch_balance()
+        usdt    = balance.get("USDT", {})
+        total   = float(usdt.get("total",  0) or 0)
+        free    = float(usdt.get("free",   0) or 0)
+        used    = float(usdt.get("used",   0) or 0)
+
+        # PNL غير المحقق
+        info            = balance.get("info", {})
+        unrealized_pnl  = float(info.get("totalUnrealizedProfit", 0) or 0)
+
+        return {
+            "wallet_balance":   round(total, 2),
+            "available":        round(free,  2),
+            "used_margin":      round(used,  2),
+            "unrealized_pnl":   round(unrealized_pnl, 4),
+            "source":           "binance_live",
+        }
+    except Exception as e:
+        logger.warning(f"[WebApp] تعذر جلب الرصيد من باينانس: {e}")
+        return {
+            "wallet_balance": 0,
+            "available":      0,
+            "used_margin":    0,
+            "unrealized_pnl": 0,
+            "source":         "unavailable",
+        }
+
+
+def _get_live_positions() -> list:
+    """
+    يجلب الصفقات المفتوحة الحقيقية من باينانس.
+    يشمل الصفقات المفتوحة يدوياً وعبر البوت على حد سواء.
+    """
+    try:
+        import ccxt
+        use_testnet = os.getenv("USE_TESTNET", "True").lower() in ("true", "1", "yes")
+        exchange = ccxt.binanceusdm({
+            "apiKey":  os.getenv("BINANCE_API_KEY", ""),
+            "secret":  os.getenv("BINANCE_API_SECRET", ""),
+            "options": {"defaultType": "future"},
+        })
+        if use_testnet:
+            exchange.set_sandbox_mode(True)
+
+        all_positions = exchange.fetch_positions()
+        active = []
+        for pos in all_positions:
+            contracts = float(pos.get("contracts", 0) or 0)
+            if contracts == 0:
+                continue
+
+            entry  = float(pos.get("entryPrice",      0) or 0)
+            mark   = float(pos.get("markPrice",        0) or 0)
+            upnl   = float(pos.get("unrealizedPnl",    0) or 0)
+            lev    = float(pos.get("leverage",         1) or 1)
+            side   = "LONG" if contracts > 0 else "SHORT"
+            symbol = str(pos.get("symbol", "")).split(":")[0]
+
+            # حساب نسبة الربح/الخسارة
+            notional = entry * abs(contracts)
+            margin   = notional / lev if lev > 0 else notional
+            roe_pct  = (upnl / margin * 100) if margin > 0 else 0.0
+
+            active.append({
+                "symbol":          symbol,
+                "side":            side,
+                "contracts":       abs(contracts),
+                "entry_price":     round(entry, 4),
+                "mark_price":      round(mark,  4),
+                "unrealized_pnl":  round(upnl,  4),
+                "roe_pct":         round(roe_pct, 2),
+                "leverage":        int(lev),
+                "source":          "binance_live",
+            })
+        return active
+
+    except Exception as e:
+        logger.warning(f"[WebApp] تعذر جلب الصفقات المفتوحة من باينانس: {e}")
+        # الاحتياطي: اقرأ من state.json (صفقات البوت فقط)
+        return _positions_from_state()
+
+
+def _positions_from_state() -> list:
+    """احتياطي: الصفقات المسجلة في state.json (بوت فقط)"""
+    state = _load_state()
+    result = []
+    for symbol, meta in state.get("entry_metadata", {}).items():
+        result.append({
+            "symbol":         symbol,
+            "side":           str(meta.get("side", "")).upper(),
+            "contracts":      float(meta.get("amount", 0) or 0),
+            "entry_price":    float(meta.get("entry_price", 0) or 0),
+            "mark_price":     0.0,
+            "unrealized_pnl": 0.0,
+            "roe_pct":        0.0,
+            "leverage":       int(meta.get("leverage", 1) or 1),
+            "source":         "state_json",
+        })
+    return result
+
+# ------------------------------------------------------------------
+# Trade / State helpers
 # ------------------------------------------------------------------
 
 def _load_trades() -> list:
@@ -48,7 +167,6 @@ def _load_trades() -> list:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
         df["roe_pct"] = 0.0
-        df = df.sort_values("exit_time", ascending=False)
         return _df_to_records(df)
     except Exception as e:
         logger.error(f"[WebApp] Error loading trades from CSV: {e}")
@@ -106,8 +224,7 @@ def _compute_stats(trades: list) -> dict:
     }
 
 def _build_chart_data(trades: list) -> dict:
-    """آخر 30 صفقة بالترتيب الزمني لرسم منحنى تراكمي"""
-    recent = list(reversed(trades[:30]))
+    recent  = list(reversed(trades[:30]))
     labels  = [t["exit_time"][-5:] for t in recent]
     running = 0.0
     data    = []
@@ -127,26 +244,11 @@ def index():
 
 @app.route("/api/dashboard")
 def api_dashboard():
-    trades = _load_trades()
-    state  = _load_state()
-    stats  = _compute_stats(trades)
-    chart  = _build_chart_data(trades)
-
-    # Positions from state
-    open_positions = []
-    for symbol, meta in state.get("entry_metadata", {}).items():
-        open_positions.append({
-            "symbol":      symbol,
-            "side":        str(meta.get("side", "")).upper(),
-            "entry_price": float(meta.get("entry_price", 0) or 0),
-            "sl":          float(meta.get("current_sl") or meta.get("sl") or 0),
-            "tp":          float(meta.get("tp1") or meta.get("tp") or 0),
-            "entry_time":  str(meta.get("entry_time", "")),
-            "partial_done": bool(meta.get("partial_tp_done", False)),
-        })
-
-    wallet = state.get("simulated_wallet", {})
-    ref_balance = float(getattr(Config, "REFERENCE_BALANCE", 50.0))
+    trades         = _load_trades()
+    stats          = _compute_stats(trades)
+    chart          = _build_chart_data(trades)
+    wallet         = _get_live_wallet()        # ← رصيد حقيقي من باينانس
+    open_positions = _get_live_positions()     # ← صفقات حقيقية من باينانس
 
     return jsonify({
         "stats":          stats,
@@ -154,7 +256,6 @@ def api_dashboard():
         "open_positions": open_positions,
         "chart":          chart,
         "wallet":         wallet,
-        "ref_balance":    ref_balance,
         "updated_at":     datetime.now().strftime("%H:%M:%S"),
     })
 
@@ -175,7 +276,7 @@ def start_webapp(state_manager=None, port: int = 8080):
             logger.info(f"[WebApp] Starting dashboard on port {port}...")
             import logging
             log = logging.getLogger("werkzeug")
-            log.setLevel(logging.ERROR)   # تكتيم سجلات Flask الصاخبة
+            log.setLevel(logging.ERROR)
             app.run(host="0.0.0.0", port=port, debug=False,
                     use_reloader=False, threaded=True)
         except Exception as e:
