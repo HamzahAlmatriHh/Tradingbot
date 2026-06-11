@@ -137,24 +137,24 @@ class DerivativesRiskFilter:
                 logger.warning(f"[CoinGlass] خطأ مع أحد المفاتيح، تجربة المفتاح التالي: {e}")
                 continue
 
-        # إذا كانت البيانات محاكاة (Mock Data) للتجريب والتدقيق
+        # إذا كانت البيانات غير متاحة (CoinGlass API فشل)
         if is_mock:
-            if getattr(Config, 'DERIVATIVES_FILTER_MODE', 'audit') == "enforce":
-                return {
-                    "decision": "BLOCK_SUGGESTED",
-                    "reason": "CoinGlass unavailable; skipping derivatives confirmation in enforce mode.",
-                    "is_mock": True,
-                    "funding_rate": 0.0,
-                    "oi_change_pct": 0.0,
-                    "long_short_ratio": 1.0,
-                    "liquidation_bias": "UNKNOWN"
-                }
-            # توليد بيانات عشوائية ولكن واقعية تتماشى مع طبيعة تذبذبات السوق
-            funding_rate = random.uniform(-0.0006, 0.0016)   # بين -0.06% و +0.16%
-            oi_change_pct = random.uniform(-0.06, 0.09)      # بين -6% و +9%
-            long_short_ratio = random.uniform(0.7, 2.8)      # بين 0.7 و 2.8
-            # تصفية عشوائية
-            liquidation_bias = random.choice(["LONG_LIQ_RISK", "SHORT_LIQ_RISK", "NEUTRAL"])
+            # ✅ إصلاح: لا نستخدم أرقاماً عشوائية لاتخاذ قرارات مالية حقيقية.
+            # بدلاً من ذلك، نُرجع قراراً محايداً صريحاً مع علامة is_mock=True
+            # حتى يمكن للنظام الخارجي التعامل معها بوعي (تسجيل فقط، عدم الحظر).
+            logger.warning(
+                f"[CoinGlass] ⚠️ لا تتوفر بيانات مشتقات حقيقية لـ {symbol}. "
+                f"القرار محايد (ALLOW) بسبب غياب البيانات — لن يُحظر التداول بناءً على بيانات وهمية."
+            )
+            return {
+                "decision": "ALLOW",
+                "funding_rate": 0.0,
+                "oi_change_pct": 0.0,
+                "long_short_ratio": 1.0,
+                "liquidation_bias": "UNKNOWN",
+                "reason": "بيانات CoinGlass غير متاحة — تم السماح بالمرور بشكل محايد (لا يُحظر بأرقام عشوائية).",
+                "is_mock": True,
+            }
             
         # منطق اتخاذ القرار وتصنيف الخطورة
         decision = "ALLOW"

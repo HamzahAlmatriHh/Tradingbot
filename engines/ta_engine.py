@@ -4,6 +4,12 @@ import numpy as np
 from core.logger import logger
 from core.config import Config
 
+# ---------------------------------------------------------------
+# HTF Trend Cache: نخزن الترند العلوي مؤقتاً لتجنب استدعاءات API متكررة
+# ---------------------------------------------------------------
+_htf_cache: dict = {}  # {symbol: {"trend": str, "ts": float}}
+HTF_CACHE_TTL_SECONDS = 900  # 15 دقيقة = عمر الشمعة الـ 1H
+
 class TAEngine:
     def __init__(self):
         pass
@@ -160,45 +166,106 @@ class TAEngine:
             df['fvg_bearish_low'] = df['fvg_bearish_low'].ffill()
             df['fvg_bearish_high'] = df['fvg_bearish_high'].ffill()
 
-            # --- OB Age & Mitigation ---
+            # --- OB Age & Mitigation Tracking ---
+            # ✅ إصلاح: نتتبع عمر الـ OB ونضع علامة Mitigated
+            # عندما يُغلق السعر داخل منطقة الـ OB (أو خلفها) تُعتبر مستهلكة ولا تُطلق إشارة جديدة
             df['bullish_ob_created'] = bullish_ob_cond
             df['bearish_ob_created'] = bearish_ob_cond
-            
+
             ages_bullish = []
             ages_bearish = []
+            mitigated_bullish = []
+            mitigated_bearish = []
             last_bull_idx = None
             last_bear_idx = None
-            
+            bull_mitigated = False
+            bear_mitigated = False
+
             for i in range(len(df)):
-                # Bullish
+                close_i = df['close'].iloc[i]
+
+                # Bullish OB
                 if df['bullish_ob_created'].iloc[i]:
                     last_bull_idx = i
+                    bull_mitigated = False  # OB جديد = غير مستهلك
                     ages_bullish.append(0)
                 elif last_bull_idx is not None:
                     ages_bullish.append(i - last_bull_idx)
+                    # إذا أغلق السعر تحت أدنى نقطة في منطقة الـ OB → مستهلك
+                    ob_low = df['ob_bullish_low'].iloc[i]
+                    if pd.notna(ob_low) and close_i < ob_low:
+                        bull_mitigated = True
                 else:
                     ages_bullish.append(np.nan)
-                    
-                # Bearish
+                mitigated_bullish.append(bull_mitigated)
+
+                # Bearish OB
                 if df['bearish_ob_created'].iloc[i]:
                     last_bear_idx = i
+                    bear_mitigated = False  # OB جديد = غير مستهلك
                     ages_bearish.append(0)
                 elif last_bear_idx is not None:
                     ages_bearish.append(i - last_bear_idx)
+                    # إذا أغلق السعر فوق أعلى نقطة في منطقة الـ OB → مستهلك
+                    ob_high = df['ob_bearish_high'].iloc[i]
+                    if pd.notna(ob_high) and close_i > ob_high:
+                        bear_mitigated = True
                 else:
                     ages_bearish.append(np.nan)
-                    
+                mitigated_bearish.append(bear_mitigated)
+
             df['ob_bullish_age'] = ages_bullish
             df['ob_bearish_age'] = ages_bearish
+            df['ob_bullish_mitigated'] = mitigated_bullish
+            df['ob_bearish_mitigated'] = mitigated_bearish
 
-            logger.debug("تم حساب SMC بشكل متقدم (OB Zones, Displacement, FVG, BOS, Age).")
+            logger.debug("تم حساب SMC بشكل متقدم (OB Zones, Displacement, FVG, BOS, Age, Mitigation).")
             return df
             
         except Exception as e:
             logger.error(f"خطأ في حساب المؤشرات الفنية: {e}")
             return df
             
-    def evaluate_trend(self, df: pd.DataFrame, symbol="Unknown", details: dict = None):
+    def get_htf_trend(self, symbol: str, client) -> str:
+        """
+        ✅ جديد: فلتر الترند العلوي (Higher TimeFrame Confirmation)
+        يجلب بيانات 1H ويقيّم الاتجاه بناءً على EMA50 و EMA200.
+        يُستخدم كفيتو: لا ندخل LONG على 15m إذا كان 1H هابطاً والعكس.
+        النتيجة مخزّنة في cache لمدة 15 دقيقة لتجنب استدعاءات API متكررة.
+        """
+        import time
+        now = time.time()
+        cached = _htf_cache.get(symbol)
+        if cached and (now - cached["ts"]) < HTF_CACHE_TTL_SECONDS:
+            return cached["trend"]
+        try:
+            bars_1h = client.fetch_ohlcv(symbol, timeframe='1h', limit=60)
+            if bars_1h is None or len(bars_1h) < 40:
+                return "neutral"
+            df_htf = bars_1h.copy()
+            df_htf['ema_50']  = ta.trend.EMAIndicator(close=df_htf['close'], window=50).ema_indicator()
+            df_htf['ema_200'] = ta.trend.EMAIndicator(close=df_htf['close'], window=200).ema_indicator()
+            last_htf = df_htf.iloc[-2]
+            ema50  = last_htf.get('ema_50',  0)
+            ema200 = last_htf.get('ema_200', 0)
+            close  = last_htf.get('close',   0)
+            if ema50 > ema200 and close > ema50:
+                trend = "bullish"
+            elif ema50 < ema200 and close < ema50:
+                trend = "bearish"
+            else:
+                trend = "neutral"
+            _htf_cache[symbol] = {"trend": trend, "ts": now}
+            logger.debug(f"[HTF 1H] {symbol}: EMA50={ema50:.4f} | EMA200={ema200:.4f} --> Trend={trend.upper()}")
+            return trend
+        except Exception as e:
+            logger.warning(f"[HTF] فشل جلب بيانات 1H لـ {symbol}: {e}")
+            return "neutral"
+
+    def evaluate_trend(self, df: pd.DataFrame, symbol="Unknown", details: dict = None, htf_trend: str = "neutral"):
+        """
+        تقييم مناطق الدخول الاستراتيجية بناءً على القواعد الاحترافية.
+        htf_trend: الترند من الإطار الزمني الأعلى (1H) — يُستخدم كفيتو.
         """
         تقييم مناطق الدخول الاستراتيجية بناءً على القواعد الاحترافية للصديق המبرمج.
         """
@@ -229,40 +296,62 @@ class TAEngine:
         
         # Invalidation Check (لمنع الدخول في مناطق مكسورة أو مستهلكة بشدة أو قديمة جداً)
         # إذا السعر الحالي أغلق تحت المنطقة، نعتبرها مكسورة ولا نتداول عليها
-        valid_bullish_ob = (ob_bullish_low > 0) and (close >= ob_bullish_low * 0.995) and (ob_bullish_age <= max_ob_age)
-        valid_bearish_ob = (ob_bearish_high > 0) and (close <= ob_bearish_high * 1.005) and (ob_bearish_age <= max_ob_age)
-        
+        # --- OB Mitigation Check ---
+        ob_bullish_mitigated = bool(latest.get('ob_bullish_mitigated', False))
+        ob_bearish_mitigated = bool(latest.get('ob_bearish_mitigated', False))
+
+        # ✅ صحة OB: موجودة + في نطاق العمر + غير مستهلكة
+        valid_bullish_ob = (
+            (ob_bullish_low > 0)
+            and (close >= ob_bullish_low * 0.995)
+            and (ob_bullish_age <= max_ob_age)
+            and not ob_bullish_mitigated
+        )
+        valid_bearish_ob = (
+            (ob_bearish_high > 0)
+            and (close <= ob_bearish_high * 1.005)
+            and (ob_bearish_age <= max_ob_age)
+            and not ob_bearish_mitigated
+        )
+
         score = 0
-        reason = "انتظار وصول السعر لمنطقة OB نشطة وحديثة"
+        reason = "انتظار وصول السعر لمنطقة OB نشطة وحديثة وغير مستهلكة"
         trend_result = "neutral"
-        
-        # 1. تقييم الاتجاه العام
-        is_uptrend = ema_50 > ema_200 if (ema_50 > 0 and ema_200 > 0) else True
-        
+
+        # 1. تقييم الاتجاه العام (15m)
+        is_uptrend_15m = ema_50 > ema_200 if (ema_50 > 0 and ema_200 > 0) else True
+
+        # ✅ جديد: فيتو HTF — لا نشتري إذا كان الترند العلوي هابطاً
+        htf_allows_buy  = htf_trend != "bearish"   # neutral أو bullish: مسموح
+        htf_allows_sell = htf_trend != "bullish"   # neutral أو bearish: مسموح
+
         # 2. الشراء (LONG)
-        if is_uptrend and valid_bullish_ob:
-            # المسافة إلى أعلى المنطقة (بداية الدخول)
+        if is_uptrend_15m and valid_bullish_ob and htf_allows_buy:
             distance_to_ob = abs(close - ob_bullish_high)
-            
-            # تقنية ATR بدلاً من 2% ثابتة (حسب اقتراح الصديق)
-            # نعتبر السعر قريب إذا كان ضمن مسافة قريبة تعتمد على التذبذب
             if distance_to_ob <= min(close * 0.02, atr * 0.8) or (close <= ob_bullish_high and close >= ob_bullish_low):
                 score = 3
                 trend_result = "buy"
-                reason = "إشارة قنص (Smart Money LONG) - السعر عند OB صاعد (Zone)"
-                optimal_entry = ob_bullish_mid # الدخول المثالي من منتصف المنطقة
-                invalidation_level = ob_bullish_low # الستوب يحدده الـ risk_manager ولا نضيف ATR هنا
-                    
+                htf_note = f" | HTF={htf_trend.upper()}" if htf_trend != "neutral" else ""
+                reason = f"إشارة قنص (Smart Money LONG) - السعر عند OB صاعد (Zone){htf_note}"
+                optimal_entry = ob_bullish_mid
+                invalidation_level = ob_bullish_low
+
         # 3. البيع (SHORT)
-        elif not is_uptrend and valid_bearish_ob:
+        elif not is_uptrend_15m and valid_bearish_ob and htf_allows_sell:
             distance_to_ob = abs(close - ob_bearish_low)
-            
             if distance_to_ob <= min(close * 0.02, atr * 0.8) or (close >= ob_bearish_low and close <= ob_bearish_high):
                 score = 3
                 trend_result = "sell"
-                reason = "إشارة قنص (Smart Money SHORT) - السعر عند OB هابط (Zone)"
-                optimal_entry = ob_bearish_mid # الدخول المثالي من منتصف المنطقة
-                invalidation_level = ob_bearish_high # الستوب يحدده الـ risk_manager ولا نضيف ATR هنا
+                htf_note = f" | HTF={htf_trend.upper()}" if htf_trend != "neutral" else ""
+                reason = f"إشارة قنص (Smart Money SHORT) - السعر عند OB هابط (Zone){htf_note}"
+                optimal_entry = ob_bearish_mid
+                invalidation_level = ob_bearish_high
+
+        # سبب الرفض بسبب HTF (للتشخيص)
+        if score == 0 and is_uptrend_15m and valid_bullish_ob and not htf_allows_buy:
+            reason = f"رُفض LONG بسبب HTF هابط (1H={htf_trend.upper()}) رغم وجود OB صاعد على 15m"
+        elif score == 0 and not is_uptrend_15m and valid_bearish_ob and not htf_allows_sell:
+            reason = f"رُفض SHORT بسبب HTF صاعد (1H={htf_trend.upper()}) رغم وجود OB هابط على 15m"
                     
         if details is not None:
             market_levels = {
@@ -276,16 +365,19 @@ class TAEngine:
                 'close': close,
                 'atr': atr,
                 'reason': reason,
-                'support': ob_bullish_high if pd.notna(ob_bullish_high) else 0, # نرسلها كدعم ليتم استخدامها في السجل
+                'support': ob_bullish_high if pd.notna(ob_bullish_high) else 0,
                 'resistance': ob_bearish_low if pd.notna(ob_bearish_low) else 0,
                 'optimal_entry': locals().get('optimal_entry', close),
                 'invalidation_level': locals().get('invalidation_level', close),
-                'ob_mid': locals().get('optimal_entry', close), # لإستخدامها في main.py
+                'ob_mid': locals().get('optimal_entry', close),
                 'market_levels': market_levels,
                 'ema_200': ema_200,
                 'ema_50': ema_50,
                 'adx': latest.get('adx', 0),
                 'rsi': latest.get('rsi', 0),
+                'htf_trend': htf_trend,                                           # ✅ جديد
+                'ob_bullish_mitigated': ob_bullish_mitigated,                     # ✅ جديد
+                'ob_bearish_mitigated': ob_bearish_mitigated,                     # ✅ جديد
                 "sell_side_sweep": bool(latest.get("sell_side_sweep", False)),
                 "buy_side_sweep": bool(latest.get("buy_side_sweep", False)),
                 "recent_sell_side_sweep": bool(latest.get("recent_sell_side_sweep", False)),
@@ -301,7 +393,9 @@ class TAEngine:
                 return {}
             df = self.add_indicators(bars)
             details = {}
-            trend = self.evaluate_trend(df, symbol=symbol, details=details)
+            # ✅ جديد: جلب الترند العلوي (1H) أولاً ثم تمريره لـ evaluate_trend
+            htf_trend = self.get_htf_trend(symbol, client)
+            trend = self.evaluate_trend(df, symbol=symbol, details=details, htf_trend=htf_trend)
             latest = df.iloc[-2]
             market_levels = {
                 "bearish_obs": [{"low": float(latest.get('ob_bearish_low', 0)), "high": float(latest.get('ob_bearish_high', 0))}],
