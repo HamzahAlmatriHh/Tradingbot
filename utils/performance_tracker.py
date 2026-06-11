@@ -55,9 +55,20 @@ class PerformanceTracker:
 
     def load_trades(self) -> pd.DataFrame:
         """
-        يقرأ سجل الصفقات وينظفه.
-        CSV هو مصدر الحقيقة لتجنب تكرار احتساب PNL بعد إعادة التشغيل.
+        يقرأ سجل الصفقات — من SQLite أولاً، ثم CSV كاحتياطي.
         """
+        # ── 1. SQLite (المصدر الأساسي) ─────────────────────────────
+        try:
+            from utils.db_manager import load_trades_df, DB_PATH
+            import os
+            if os.path.exists(DB_PATH):
+                df = load_trades_df()
+                if not df.empty:
+                    return df
+        except Exception as e:
+            logger.warning(f"[PerformanceTracker] تعذر القراءة من SQLite، التراجع للـ CSV: {e}")
+
+        # ── 2. CSV (الاحتياطي) ─────────────────────────────────────
         if not os.path.exists(self.csv_path):
             return self._empty_df()
 
@@ -67,74 +78,43 @@ class PerformanceTracker:
             if df.empty:
                 return self._empty_df()
 
-            # ضمان وجود الأعمدة حتى لو السجل قديم.
             for col in self.REQUIRED_COLUMNS:
                 if col not in df.columns:
                     df[col] = None
 
-            # تحويل التواريخ.
             df["entry_time"] = pd.to_datetime(df["entry_time"], errors="coerce")
-            df["exit_time"] = pd.to_datetime(df["exit_time"], errors="coerce")
+            df["exit_time"]  = pd.to_datetime(df["exit_time"],  errors="coerce")
 
-            # تحويل الأرقام.
             numeric_cols = [
-                "entry_price",
-                "exit_price",
-                "pnl",
-                "pnl_pct",
-                "amount",
-                "risk_pct",
-                "leverage",
-                "slippage",
-                "wallet_equity_at_entry",
-                "wallet_pnl_pct",
-                "reference_balance",
-                "pnl_ref_50",
+                "entry_price", "exit_price", "pnl", "pnl_pct", "amount",
+                "risk_pct", "leverage", "slippage", "wallet_equity_at_entry",
+                "wallet_pnl_pct", "reference_balance", "pnl_ref_50",
             ]
             for col in numeric_cols:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-            # تنظيف الصفقات غير المكتملة.
             df = df[df["exit_time"].notna()].copy()
 
-            # منع احتساب نفس الصفقة مرتين إذا تكرر تسجيلها.
-            dedup_cols = [
-                "trade_id",
-                "symbol",
-                "side",
-                "entry_time",
-                "entry_price",
-                "exit_time",
-                "exit_price",
-                "pnl",
-            ]
+            dedup_cols = ["trade_id", "symbol", "side", "entry_time",
+                          "entry_price", "exit_time", "exit_price", "pnl"]
             dedup_cols = [c for c in dedup_cols if c in df.columns]
             df = df.drop_duplicates(subset=dedup_cols, keep="last")
 
-            # تجهيز بيانات إضافية.
             df["symbol"] = df["symbol"].fillna("").astype(str)
-            df["side"] = df["side"].fillna("").astype(str).str.upper()
-
+            df["side"]   = df["side"].fillna("").astype(str).str.upper()
             df["entry_notional"] = (df["entry_price"] * df["amount"]).abs()
             df["leverage"] = df["leverage"].replace(0, 1).clip(lower=1)
-
-            # الهامش المستخدم = قيمة الصفقة / الرافعة.
             df["margin_used"] = df["entry_notional"] / df["leverage"]
-
-            # ROE = الربح / الهامش المستخدم.
             df["roe_pct"] = df.apply(
                 lambda r: (r["pnl"] / r["margin_used"] * 100)
                 if r["margin_used"] > 0 else 0.0,
                 axis=1
             )
-
-            # نسبة الحركة على قيمة الصفقة نفسها.
             df["price_pnl_pct"] = df.apply(
                 lambda r: (r["pnl"] / r["entry_notional"] * 100)
                 if r["entry_notional"] > 0 else 0.0,
                 axis=1
             )
-
             return df.sort_values("exit_time")
 
         except Exception as e:

@@ -25,6 +25,17 @@ def init_webapp(state_manager=None):
 # ------------------------------------------------------------------
 
 def _load_trades() -> list:
+    # ── SQLite أولاً ─────────────────────────────────────────────
+    try:
+        from utils.db_manager import load_trades_df, DB_PATH
+        if os.path.exists(DB_PATH):
+            df = load_trades_df()
+            if not df.empty:
+                return _df_to_records(df)
+    except Exception:
+        pass
+
+    # ── CSV احتياطي ───────────────────────────────────────────────
     csv_path = getattr(Config, "TESTNET_TRADES_LOG", "/app/data/testnet_trades_log.csv")
     if not os.path.exists(csv_path):
         return []
@@ -33,31 +44,35 @@ def _load_trades() -> list:
         df["entry_time"] = pd.to_datetime(df["entry_time"], errors="coerce")
         df["exit_time"]  = pd.to_datetime(df["exit_time"],  errors="coerce")
         df = df[df["exit_time"].notna()].copy()
-        for col in ["pnl", "pnl_pct", "entry_price", "exit_price", "roe_pct",
-                    "wallet_equity_at_entry", "wallet_pnl_pct"]:
+        for col in ["pnl", "pnl_pct", "entry_price", "exit_price"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-        if "roe_pct" not in df.columns:
-            df["roe_pct"] = 0.0
+        df["roe_pct"] = 0.0
         df = df.sort_values("exit_time", ascending=False)
-        records = []
-        for _, row in df.head(60).iterrows():
-            records.append({
-                "symbol":      str(row.get("symbol", "")),
-                "side":        str(row.get("side", "")).upper(),
-                "entry_price": float(row.get("entry_price", 0)),
-                "exit_price":  float(row.get("exit_price", 0)),
-                "pnl":         float(row.get("pnl", 0)),
-                "pnl_pct":     float(row.get("pnl_pct", 0)),
-                "roe_pct":     float(row.get("roe_pct", 0)),
-                "exit_reason": str(row.get("exit_reason", "")),
-                "entry_time":  row["entry_time"].strftime("%m-%d %H:%M") if pd.notna(row["entry_time"]) else "",
-                "exit_time":   row["exit_time"].strftime("%m-%d %H:%M")  if pd.notna(row["exit_time"])  else "",
-            })
-        return records
+        return _df_to_records(df)
     except Exception as e:
-        logger.error(f"[WebApp] Error loading trades: {e}")
+        logger.error(f"[WebApp] Error loading trades from CSV: {e}")
         return []
+
+
+def _df_to_records(df: pd.DataFrame) -> list:
+    """يحوّل DataFrame إلى قائمة dicts جاهزة لـ JSON."""
+    df = df.sort_values("exit_time", ascending=False)
+    records = []
+    for _, row in df.head(60).iterrows():
+        records.append({
+            "symbol":      str(row.get("symbol", "")),
+            "side":        str(row.get("side", "")).upper(),
+            "entry_price": float(row.get("entry_price", 0)),
+            "exit_price":  float(row.get("exit_price", 0)),
+            "pnl":         float(row.get("pnl", 0)),
+            "pnl_pct":     float(row.get("pnl_pct", 0)),
+            "roe_pct":     float(row.get("roe_pct", 0)),
+            "exit_reason": str(row.get("exit_reason", "")),
+            "entry_time":  row["entry_time"].strftime("%m-%d %H:%M") if pd.notna(row.get("entry_time")) else "",
+            "exit_time":   row["exit_time"].strftime("%m-%d %H:%M")  if pd.notna(row.get("exit_time"))  else "",
+        })
+    return records
 
 def _load_state() -> dict:
     state_file = os.getenv("STATE_FILE", "/app/data/bot_state.json")

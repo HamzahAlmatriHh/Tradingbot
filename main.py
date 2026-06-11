@@ -27,6 +27,8 @@ from utils.api_status_monitor import APIStatusMonitor
 from strategy.filter_profiles import get_filter_profile
 from utils.trade_journal import TradeJournal
 from webapp.server import start_webapp
+from utils.db_manager import init_db, insert_trade, trade_exists, migrate_from_csv
+
 
 def maybe_send_periodic_reports(notifier, state_manager, client=None):
     """
@@ -119,21 +121,9 @@ def get_wallet_equity_snapshot(client, state_manager=None):
 
 def log_testnet_trade(symbol, entry_meta, exit_details):
     """
-    تسجيل الصفقات الفردية لـ Testnet بالكامل في ملف CSV محلي
+    تسجيل الصفقات في SQLite (أساسي) + CSV (نسخة احتياطية للتوافق)
     """
-    file_path = getattr(Config, "TESTNET_TRADES_LOG", "testnet_trades_log.csv")
-    os.makedirs(os.path.dirname(os.path.abspath(file_path)) or ".", exist_ok=True)
-    file_exists = os.path.exists(file_path)
-    
-    headers = [
-        "trade_id", "symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price",
-        "pnl", "pnl_pct", "exit_reason", "entry_reason", "sentiment_score", "adx",
-        "ema_200", "atr", "spread", "volume_24h", "risk_pct", "leverage", "slippage",
-        "amount", "filter_profile", "journal_dir",
-        "wallet_equity_at_entry", "wallet_pnl_pct", "reference_balance", "pnl_ref_50"
-    ]
-    
-    exit_time = exit_details.get("exit_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    exit_time  = exit_details.get("exit_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     entry_time = entry_meta.get("entry_time", "")
 
     trade_id = entry_meta.get("trade_id") or (
@@ -141,57 +131,60 @@ def log_testnet_trade(symbol, entry_meta, exit_details):
         f"{entry_meta.get('entry_price', 0.0)}|{exit_time}|{exit_details.get('exit_price', 0.0)}"
     )
 
-    # منع تكرار نفس الصفقة في السجل إذا وصل إشعار الإغلاق مرتين
-    if file_exists:
-        try:
-            old_df = pd.read_csv(file_path)
-            if "trade_id" in old_df.columns and trade_id in set(old_df["trade_id"].astype(str)):
-                logger.warning(f"⚠️ الصفقة {trade_id} مسجلة مسبقًا، سيتم تجاهل التكرار.")
-                return True
-        except Exception as e:
-            logger.warning(f"تعذر فحص تكرار الصفقة في CSV: {e}")
-    
     row = {
-        "trade_id": trade_id,
-        "symbol": symbol,
-        "side": entry_meta.get("side", ""),
-        "entry_time": entry_time,
-        "entry_price": entry_meta.get("entry_price", 0.0),
-        "exit_time": exit_time,
-        "exit_price": exit_details.get("exit_price", 0.0),
-        "pnl": exit_details.get("pnl", 0.0),
-        "pnl_pct": exit_details.get("pnl_pct", 0.0),
-        "exit_reason": exit_details.get("exit_reason", ""),
-        "entry_reason": entry_meta.get("entry_reason", ""),
-        "sentiment_score": entry_meta.get("sentiment_score", 0.0),
-        "adx": entry_meta.get("adx", 0.0),
-        "ema_200": entry_meta.get("ema_200", 0.0),
-        "atr": entry_meta.get("atr", 0.0),
-        "spread": entry_meta.get("spread", 0.0),
-        "volume_24h": entry_meta.get("volume_24h", 0.0),
-        "risk_pct": entry_meta.get("risk_pct", 0.0),
-        "leverage": entry_meta.get("leverage", 1.0),
-        "slippage": exit_details.get("slippage", 0.0),
-        "amount": entry_meta.get("amount", 0.0),
-        "filter_profile": entry_meta.get("filter_profile", ""),
-        "journal_dir": entry_meta.get("journal_dir", ""),
+        "trade_id":               trade_id,
+        "symbol":                 symbol,
+        "side":                   entry_meta.get("side", ""),
+        "entry_time":             entry_time,
+        "entry_price":            entry_meta.get("entry_price", 0.0),
+        "exit_time":              exit_time,
+        "exit_price":             exit_details.get("exit_price", 0.0),
+        "pnl":                    exit_details.get("pnl", 0.0),
+        "pnl_pct":                exit_details.get("pnl_pct", 0.0),
+        "exit_reason":            exit_details.get("exit_reason", ""),
+        "entry_reason":           entry_meta.get("entry_reason", ""),
+        "sentiment_score":        entry_meta.get("sentiment_score", 0.0),
+        "adx":                    entry_meta.get("adx", 0.0),
+        "ema_200":                entry_meta.get("ema_200", 0.0),
+        "atr":                    entry_meta.get("atr", 0.0),
+        "spread":                 entry_meta.get("spread", 0.0),
+        "volume_24h":             entry_meta.get("volume_24h", 0.0),
+        "risk_pct":               entry_meta.get("risk_pct", 0.0),
+        "leverage":               entry_meta.get("leverage", 1.0),
+        "slippage":               exit_details.get("slippage", 0.0),
+        "amount":                 entry_meta.get("amount", 0.0),
+        "filter_profile":         entry_meta.get("filter_profile", ""),
+        "journal_dir":            entry_meta.get("journal_dir", ""),
         "wallet_equity_at_entry": entry_meta.get("wallet_equity_at_entry", 0.0),
-        "wallet_pnl_pct": exit_details.get("wallet_pnl_pct", 0.0),
-        "reference_balance": entry_meta.get("reference_balance", 50.0),
-        "pnl_ref_50": exit_details.get("pnl_ref_50", 0.0),
+        "wallet_pnl_pct":         exit_details.get("wallet_pnl_pct", 0.0),
+        "reference_balance":      entry_meta.get("reference_balance", 50.0),
+        "pnl_ref_50":             exit_details.get("pnl_ref_50", 0.0),
     }
-    
+
+    # ── الكتابة الأساسية: SQLite ──────────────────────────────────
+    if trade_exists(trade_id):
+        logger.warning(f"⚠️ الصفقة {trade_id} مسجلة مسبقًا في SQLite، تم تجاهل التكرار.")
+        return True
+
+    db_ok = insert_trade(row)
+    if db_ok:
+        logger.info(f"✅ [{symbol}] صفقة مسجلة في SQLite.")
+
+    # ── النسخة الاحتياطية: CSV (للتوافق مع الأدوات القديمة) ──────
     try:
+        file_path  = getattr(Config, "TESTNET_TRADES_LOG", "testnet_trades_log.csv")
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)) or ".", exist_ok=True)
+        file_exists = os.path.exists(file_path)
+        headers = list(row.keys())
         with open(file_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=headers)
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
-        logger.info(f"✅ تم تسجيل صفقة {symbol} في سجل الصفقات بنجاح.")
-        return True
     except Exception as e:
-        logger.error(f"❌ فشل تسجيل الصفقة في الملف المحلي: {e}")
-        return False
+        logger.warning(f"[CSV-Backup] فشل كتابة النسخة الاحتياطية: {e}")
+
+    return db_ok
 
 def execute_and_protect_trade(symbol, final_decision, amount, current_price, trade_leverage, trade_risk_pct, atr_val, coin_data, sentiment, bars_df, ticker, ta_trend, client, risk_manager, trailing_manager, state_manager, notifier, active_symbols, scan_results, invalidation_level=None):
     """
@@ -1847,6 +1840,20 @@ def main():
         raise
         
     hybrid_strategy= HybridStrategy()
+
+    # ── تهيئة قاعدة بيانات SQLite وترحيل CSV القديم ──────────────
+    try:
+        init_db()
+        csv_path = getattr(Config, "TESTNET_TRADES_LOG", "/app/data/testnet_trades_log.csv")
+        migrated = migrate_from_csv(csv_path)
+        if migrated > 0:
+            notifier.send_message(
+                f"🗄️ <b>ترحيل البيانات اكتمل</b>\n"
+                f"تم نقل <code>{migrated}</code> صفقة من CSV إلى SQLite بنجاح."
+            )
+    except Exception as e:
+        logger.error(f"[DB] خطأ أثناء تهيئة/ترحيل قاعدة البيانات: {e}")
+
     risk_manager   = RiskManager()
     trailing_manager = TrailingStopManager(state_manager=state_manager)
     alert_manager = TradeApproachAlertManager(state_manager=state_manager, notifier=notifier)
