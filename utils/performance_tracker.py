@@ -428,14 +428,7 @@ class PerformanceTracker:
             msg += f"• Available: <code>{exchange_wallet['available']:.2f}</code> USDT\n"
             msg += f"• Unrealized PNL: <code>{exchange_wallet['unrealized_pnl']:+.2f}</code> USDT\n\n"
 
-        ref_balance = float(getattr(Config, "REFERENCE_BALANCE", 50.0))
-        df_all = self.load_trades()
-        ref_pnl_total = float(df_all["pnl_ref_50"].sum()) if not df_all.empty and "pnl_ref_50" in df_all.columns else 0.0
 
-        msg += "🧪 <b>محفظة مرجعية للمقارنة</b>\n"
-        msg += f"• رأس مرجعي: <code>{ref_balance:.2f}</code> USDT\n"
-        msg += f"• PNL مرجعي: <code>{ref_pnl_total:+.4f}</code> USDT\n"
-        msg += f"• رصيد مرجعي: <code>{ref_balance + ref_pnl_total:.4f}</code> USDT\n\n"
 
         # ==========================================================
         # Open Positions Section
