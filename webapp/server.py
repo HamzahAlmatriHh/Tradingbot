@@ -72,54 +72,53 @@ def _get_live_positions() -> list:
             
         state_meta = {}
         if _state_manager:
-            state_meta = _state_manager.get_all_metadata()
+            try:
+                state_meta = _state_manager.get("entry_metadata", {})
+            except Exception:
+                pass
             
         all_positions = _client.exchange.fetch_positions()
         active = []
         for pos in all_positions:
             info = pos.get("info", {})
-            amt = float(info.get("positionAmt", pos.get("contracts", 0)) or 0)
+            amt = float(info.get("positionAmt", 0) or 0)
             
             if amt == 0:
                 continue
 
-            contracts = abs(amt)
-            entry  = float(pos.get("entryPrice") or info.get("entryPrice", 0) or 0)
-            mark   = float(pos.get("markPrice") or info.get("markPrice", 0) or 0)
-            upnl   = float(pos.get("unrealizedPnl") or info.get("unRealizedProfit", 0) or 0)
-            lev    = float(pos.get("leverage") or info.get("leverage", 1) or 1)
-            side   = "LONG" if amt > 0 else "SHORT"
-            
-            raw_symbol = str(pos.get("symbol") or info.get("symbol", ""))
-            symbol = raw_symbol.split(":")[0].replace("/", "")
-            if not symbol.endswith("USDT"):
-                symbol = symbol + "USDT"
+            contracts  = abs(amt)
+            entry      = float(pos.get("entryPrice")  or info.get("entryPrice",  0) or 0)
+            mark       = float(pos.get("markPrice")   or info.get("markPrice",   0) or 0)
+            upnl       = float(pos.get("unrealizedPnl") or info.get("unRealizedProfit", 0) or 0)
+            lev        = float(pos.get("leverage")    or info.get("leverage",    1) or 1)
+            side       = "LONG" if amt > 0 else "SHORT"
+            symbol_raw = str(info.get("symbol", ""))       # e.g. "NEARUSDT"
+            symbol_ccxt = str(pos.get("symbol", ""))       # e.g. "NEAR/USDT:USDT"
+            # Use the clean NEAR/USDT form for state_meta lookup
+            slash_sym  = symbol_ccxt.split(":")[0]         # "NEAR/USDT"
 
-            notional = entry * contracts
-            margin   = notional / lev if lev > 0 else notional
-            roe_pct  = (upnl / margin * 100) if margin > 0 else 0.0
+            notional   = entry * contracts
+            margin     = notional / lev if lev > 0 else notional
+            roe_pct    = (upnl / margin * 100) if margin > 0 else 0.0
             
             # جلب SL/TP من حالة البوت إذا كانت الصفقة مفتوحة عبر البوت
-            bot_meta = state_meta.get(symbol, {})
-            if not bot_meta and "/" not in symbol:
-                bot_meta = state_meta.get(f"{symbol[:-4]}/{symbol[-4:]}", {})
-
+            bot_meta = state_meta.get(slash_sym) or state_meta.get(symbol_raw) or {}
             sl = float(bot_meta.get("sl", 0) or 0)
             tp = float(bot_meta.get("tp", 0) or 0)
 
             active.append({
-                "symbol":          symbol,
-                "side":            side,
-                "contracts":       contracts,
-                "margin_used":     round(margin, 2),
-                "entry_price":     round(entry, 4),
-                "mark_price":      round(mark,  4),
-                "unrealized_pnl":  round(upnl,  4),
-                "roe_pct":         round(roe_pct, 2),
-                "leverage":        int(lev),
-                "sl":              sl if sl > 0 else None,
-                "tp":              tp if tp > 0 else None,
-                "source":          "binance_live",
+                "symbol":         slash_sym or symbol_raw,
+                "side":           side,
+                "contracts":      contracts,
+                "margin_used":    round(margin, 2),
+                "entry_price":    round(entry, 4),
+                "mark_price":     round(mark,  4),
+                "unrealized_pnl": round(upnl,  4),
+                "roe_pct":        round(roe_pct, 2),
+                "leverage":       int(lev),
+                "sl":             sl if sl > 0 else None,
+                "tp":             tp if tp > 0 else None,
+                "source":         "binance_live",
             })
         return active
 
