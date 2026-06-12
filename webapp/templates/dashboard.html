@@ -696,9 +696,12 @@
     const totalPnl  = parseFloat(s.total_pnl || 0);
     const winRate   = parseFloat(s.win_rate  || 0);
     const pf        = parseFloat(s.profit_factor || 0);
-    const walletBal = parseFloat(w.wallet_balance || data.ref_balance || 50);
-    const realPnl   = parseFloat(w.realized_pnl || 0);
-    const totalRet  = parseFloat(w.total_return_pct || 0);
+    const walletBal = parseFloat(w.wallet_balance || 0);
+    const available = parseFloat(w.available || 0);
+    const usedMargin = parseFloat(w.used_margin || 0);
+    const upnl      = parseFloat(w.unrealized_pnl || 0);
+    const realPnl   = parseFloat(s.total_pnl || 0);
+    const totalRet  = parseFloat(s.win_rate || 0);
 
     /* colour helpers */
     const gc  = v => v >= 0 ? 'col-g' : 'col-r';
@@ -736,27 +739,27 @@
     /* ── Wallet hero ── */
     html += `
     <div class="wallet-hero fade-in" style="animation-delay:.05s">
-      <div class="wallet-title">المحفظة التجريبية</div>
+      <div class="wallet-title">محفظة Binance (Live)</div>
       <div class="balance-display">
         <div class="balance-amount">${walletBal.toFixed(2)}</div>
         <div class="balance-unit">USDT</div>
       </div>
       <div class="wallet-rows">
         <div class="wallet-stat">
-          <div class="wallet-stat-label">PNL المحقق</div>
-          <div class="wallet-stat-val ${gc(realPnl)}">${fmtPnl(realPnl)} USDT</div>
+          <div class="wallet-stat-label">المتاح (Available)</div>
+          <div class="wallet-stat-val col-g">${available.toFixed(2)} USDT</div>
         </div>
         <div class="wallet-stat">
-          <div class="wallet-stat-label">العائد الكلي</div>
-          <div class="wallet-stat-val ${gc(totalRet)}">${fmtPct(totalRet)}</div>
+          <div class="wallet-stat-label">المستخدم (Used)</div>
+          <div class="wallet-stat-val col-y">${usedMargin.toFixed(2)} USDT</div>
         </div>
         <div class="wallet-stat">
-          <div class="wallet-stat-label">أفضل صفقة</div>
-          <div class="wallet-stat-val col-g">+${parseFloat(s.best_trade||0).toFixed(4)}</div>
+          <div class="wallet-stat-label">Unrealized PNL</div>
+          <div class="wallet-stat-val ${gc(upnl)}">${fmtPnl(upnl)}</div>
         </div>
         <div class="wallet-stat">
-          <div class="wallet-stat-label">أسوأ صفقة</div>
-          <div class="wallet-stat-val col-r">${parseFloat(s.worst_trade||0).toFixed(4)}</div>
+          <div class="wallet-stat-label">Realized PNL (البوت)</div>
+          <div class="wallet-stat-val ${gc(realPnl)}">${fmtPnl(realPnl)}</div>
         </div>
       </div>
     </div>`;
