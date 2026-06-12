@@ -711,7 +711,7 @@
     /* ── KPI grid ── */
     let html = `<div class="kpi-grid fade-in">
       <div class="kpi v">
-        <div class="kpi-label">إجمالي الصفقات</div>
+        <div class="kpi-label">الصفقات المغلقة</div>
         <div class="kpi-value col-v">${s.total || 0}</div>
         <div class="kpi-sub">
           <span class="pos">✅ ${s.wins||0}</span>
@@ -720,12 +720,12 @@
         </div>
       </div>
       <div class="kpi ${winRate >= 50 ? 'g' : 'r'}">
-        <div class="kpi-label">نسبة الفوز</div>
+        <div class="kpi-label">دقة الاستراتيجية (Win Rate)</div>
         <div class="kpi-value ${winRate >= 50 ? 'col-g' : 'col-r'}">${winRate}%</div>
         <div class="kpi-sub">الهدف › 50%</div>
       </div>
       <div class="kpi ${totalPnl >= 0 ? 'g' : 'r'}">
-        <div class="kpi-label">صافي الربح</div>
+        <div class="kpi-label">الربح الصافي (Net)</div>
         <div class="kpi-value ${gc(totalPnl)}">${fmtPnl(totalPnl)}</div>
         <div class="kpi-sub">USDT</div>
       </div>
@@ -793,19 +793,28 @@
       ops.forEach((p, i) => {
         const isLong = p.side === 'BUY' || p.side === 'LONG';
         html += `
-        <div class="pos-card fade-in" style="animation-delay:${.16+i*.04}s">
-          <div class="pos-dir ${isLong ? 'long' : 'short'}">${isLong ? 'LONG' : 'SHORT'}</div>
-          <div class="pos-body">
-            <div class="pos-pair">${p.symbol}</div>
-            <div class="pos-meta">
-              <span>دخول: ${parseFloat(p.entry_price).toFixed(4)}</span>
-              <span class="sl">SL ${parseFloat(p.sl).toFixed(4)}</span>
-              <span class="tp">TP ${parseFloat(p.tp).toFixed(4)}</span>
+        <div class="pos-card fade-in" style="animation-delay:${.16+i*.04}s; display:block; padding:10px;">
+          <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px;">
+            <div class="pos-dir ${isLong ? 'long' : 'short'}">${isLong ? 'LONG' : 'SHORT'}</div>
+            <div class="pos-body">
+              <div class="pos-pair">${p.symbol} <span style="font-size:10px; color:var(--text3); font-weight:normal;">${p.leverage}x</span></div>
+              <div class="pos-meta">
+                <span style="color:var(--text2)">كمية: ${p.contracts}</span>
+                <span style="color:var(--text2)">هامش: ${p.margin_used} USDT</span>
+              </div>
             </div>
-            ${p.partial_done ? '<span class="tp1-tag">TP1 ✅</span>' : ''}
+            <div class="pos-right">
+              <div class="pos-pnl ${gc(p.unrealized_pnl)}">${fmtPnl(p.unrealized_pnl)}</div>
+              <div class="pos-time ${gc(p.roe_pct)}" style="font-weight:bold; font-size:11px;">${p.roe_pct >= 0 ? '+':''}${p.roe_pct}% ROE</div>
+            </div>
           </div>
-          <div class="pos-right">
-            <div class="pos-time">${p.entry_time}</div>
+          <div class="pos-meta" style="background:var(--surface2); padding:8px 10px; border-radius:6px; justify-content:space-between; border: 1px solid var(--border);">
+             <span>سعر الدخول: <strong style="color:var(--text1);">${parseFloat(p.entry_price).toFixed(4)}</strong></span>
+             <span>السوق: <strong style="color:var(--text1);">${parseFloat(p.mark_price).toFixed(4)}</strong></span>
+          </div>
+          <div class="pos-meta" style="background:var(--surface2); padding:8px 10px; border-radius:6px; justify-content:space-between; border: 1px solid var(--border); margin-top:4px;">
+             ${p.sl ? `<span class="sl">SL: <strong>${parseFloat(p.sl).toFixed(4)}</strong></span>` : '<span class="sl" style="opacity:0.5">SL: غير محدد</span>'}
+             ${p.tp ? `<span class="tp">TP: <strong>${parseFloat(p.tp).toFixed(4)}</strong></span>` : '<span class="tp" style="opacity:0.5">TP: غير محدد</span>'}
           </div>
         </div>`;
       });

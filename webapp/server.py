@@ -70,6 +70,10 @@ def _get_live_positions() -> list:
         if not _client:
             raise Exception("Client not initialized")
             
+        state_meta = {}
+        if _state_manager:
+            state_meta = _state_manager.get_all_metadata()
+            
         all_positions = _client.exchange.fetch_positions()
         active = []
         for pos in all_positions:
@@ -87,16 +91,24 @@ def _get_live_positions() -> list:
             notional = entry * abs(contracts)
             margin   = notional / lev if lev > 0 else notional
             roe_pct  = (upnl / margin * 100) if margin > 0 else 0.0
+            
+            # جلب SL/TP من حالة البوت إذا كانت الصفقة مفتوحة عبر البوت
+            bot_meta = state_meta.get(symbol, {})
+            sl = float(bot_meta.get("sl", 0) or 0)
+            tp = float(bot_meta.get("tp", 0) or 0)
 
             active.append({
                 "symbol":          symbol,
                 "side":            side,
                 "contracts":       abs(contracts),
+                "margin_used":     round(margin, 2),
                 "entry_price":     round(entry, 4),
                 "mark_price":      round(mark,  4),
                 "unrealized_pnl":  round(upnl,  4),
                 "roe_pct":         round(roe_pct, 2),
                 "leverage":        int(lev),
+                "sl":              sl if sl > 0 else None,
+                "tp":              tp if tp > 0 else None,
                 "source":          "binance_live",
             })
         return active
