@@ -777,35 +777,15 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
 
     # جلب الرصيد الإجمالي (يشمل الرصيد المتاح + الهامش المحجوز في الصفقات)
     balance = client.get_balance()
-    usdt_free = balance.get('USDT', {}).get('free', 0) if balance else 0
-    usdt_total = balance.get('USDT', {}).get('total', 0) if balance else 0
+    info = balance.get("info", {}) if balance else {}
     
-    # [ميزة الرصيد الوهمي]: تقييد الرصيد المستخدم للمحاكاة (مثال: 50 دولار فقط بدلاً من 100 ألف)
-    # ملاحظة: هذا التقييد يعمل *فقط* في الـ Testnet (التجريبي). 
-    # بمجرد تحويل البوت للحساب الحقيقي (USE_TESTNET=False) سيتم إلغاء هذا التقييد برمجياً وسيعتمد على الرصيد الفعلي في منصة باينانس.
-    simulated_cap = getattr(Config, "TESTNET_SIMULATED_BALANCE", 0)
-
-    if getattr(Config, "USE_TESTNET", False) and simulated_cap > 0:
-        info = balance.get("info", {}) if balance else {}
-        total_unrealized = float(info.get("totalUnrealizedProfit", 0) or 0)
-
-        tracker = PerformanceTracker(state_manager)
-        sim_wallet = tracker.get_wallet(unrealized_pnl=total_unrealized)
-
-        usdt_total = sim_wallet["equity"]
-        usdt_free = sim_wallet["available"]
-
-        logger.info(
-            f"[SimWallet] الرصيد المتاح: {usdt_free:.2f} USDT | "
-            f"Equity وهمي: {usdt_total:.2f} USDT | "
-            f"Realized: {sim_wallet['realized_pnl']:+.2f} USDT | "
-            f"Unrealized: {sim_wallet['unrealized_pnl']:+.2f} USDT"
-        )
-    else:
-        logger.info(
-            f"الرصيد المتاح: {usdt_free:.2f} USDT | "
-            f"الإجمالي Equity: {usdt_total:.2f} USDT"
-        )
+    usdt_free = balance.get('USDT', {}).get('free', 0) if balance else 0
+    usdt_total = float(info.get("totalMarginBalance", usdt_free))
+    
+    logger.info(
+        f"الرصيد المتاح: {usdt_free:.2f} USDT | "
+        f"الإجمالي Equity: {usdt_total:.2f} USDT"
+    )
     
     # تحديث الرصيد اليومي (المرجعي) بناءً على الرصيد الإجمالي
     if usdt_total > 0:
@@ -1452,13 +1432,7 @@ def monitor_virtual_orders(client, state_manager, notifier, trailing_manager, ri
                     balance = client.get_balance()
                     usdt_free = balance.get("USDT", {}).get("free", 0) if balance else 0
 
-                    if getattr(Config, "USE_TESTNET", False) and getattr(Config, "TESTNET_SIMULATED_BALANCE", 0) > 0:
-                        info = balance.get("info", {}) if balance else {}
-                        total_unrealized = float(info.get("totalUnrealizedProfit", 0) or 0)
 
-                        tracker = PerformanceTracker(state_manager)
-                        sim_wallet = tracker.get_wallet(unrealized_pnl=total_unrealized)
-                        usdt_free = sim_wallet["available"]
 
                     temp_sl, _ = risk_manager.calculate_sl_tp(
                         side,
