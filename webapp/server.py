@@ -14,43 +14,39 @@ from core.logger import logger
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
 _state_manager = None
+_client = None
 
-def init_webapp(state_manager=None):
-    global _state_manager
+def init_webapp(state_manager=None, client=None):
+    global _state_manager, _client
     _state_manager = state_manager
+    _client = client
 
 # ------------------------------------------------------------------
 # Live Binance API helpers (بيانات حقيقية من باينانس مباشرة)
 # ------------------------------------------------------------------
 
 def _get_live_wallet() -> dict:
-    """
-    يجلب الرصيد الحقيقي من باينانس (Testnet أو Live).
-    هذا هو الرصيد الفعلي في حسابك — لا رقم وهمي.
-    """
+    """يجلب الرصيد الحقيقي من باينانس عبر الكلاينت الرئيسي"""
+    global _client
     try:
-        import ccxt
-        use_testnet = os.getenv("USE_TESTNET", "True").lower() in ("true", "1", "yes")
-        exchange = ccxt.binanceusdm({
-            "apiKey":  os.getenv("BINANCE_API_KEY", ""),
-            "secret":  os.getenv("BINANCE_API_SECRET", ""),
-            "options": {"defaultType": "future"},
-        })
-        if use_testnet:
-            exchange.set_sandbox_mode(True)
-
-        balance = exchange.fetch_balance()
+        if not _client:
+            raise Exception("Client not initialized in webapp")
+        
+        balance = _client.get_balance()
+        if not balance:
+            raise Exception("Empty balance returned")
+            
         usdt    = balance.get("USDT", {})
+        info    = balance.get("info", {})
+        
         total   = float(usdt.get("total",  0) or 0)
         free    = float(usdt.get("free",   0) or 0)
         used    = float(usdt.get("used",   0) or 0)
-
-        # PNL غير المحقق
-        info            = balance.get("info", {})
-        unrealized_pnl  = float(info.get("totalUnrealizedProfit", 0) or 0)
+        unrealized_pnl = float(info.get("totalUnrealizedProfit", 0) or 0)
+        total_margin = float(info.get("totalMarginBalance", total))
 
         return {
-            "wallet_balance":   round(total, 2),
+            "wallet_balance":   round(total_margin, 2),
             "available":        round(free,  2),
             "used_margin":      round(used,  2),
             "unrealized_pnl":   round(unrealized_pnl, 4),
@@ -68,22 +64,13 @@ def _get_live_wallet() -> dict:
 
 
 def _get_live_positions() -> list:
-    """
-    يجلب الصفقات المفتوحة الحقيقية من باينانس.
-    يشمل الصفقات المفتوحة يدوياً وعبر البوت على حد سواء.
-    """
+    """يجلب الصفقات المفتوحة الحقيقية عبر الكلاينت الرئيسي"""
+    global _client
     try:
-        import ccxt
-        use_testnet = os.getenv("USE_TESTNET", "True").lower() in ("true", "1", "yes")
-        exchange = ccxt.binanceusdm({
-            "apiKey":  os.getenv("BINANCE_API_KEY", ""),
-            "secret":  os.getenv("BINANCE_API_SECRET", ""),
-            "options": {"defaultType": "future"},
-        })
-        if use_testnet:
-            exchange.set_sandbox_mode(True)
-
-        all_positions = exchange.fetch_positions()
+        if not _client:
+            raise Exception("Client not initialized")
+            
+        all_positions = _client.exchange.fetch_positions()
         active = []
         for pos in all_positions:
             contracts = float(pos.get("contracts", 0) or 0)
@@ -97,7 +84,6 @@ def _get_live_positions() -> list:
             side   = "LONG" if contracts > 0 else "SHORT"
             symbol = str(pos.get("symbol", "")).split(":")[0]
 
-            # حساب نسبة الربح/الخسارة
             notional = entry * abs(contracts)
             margin   = notional / lev if lev > 0 else notional
             roe_pct  = (upnl / margin * 100) if margin > 0 else 0.0
@@ -117,7 +103,6 @@ def _get_live_positions() -> list:
 
     except Exception as e:
         logger.warning(f"[WebApp] تعذر جلب الصفقات المفتوحة من باينانس: {e}")
-        # الاحتياطي: اقرأ من state.json (صفقات البوت فقط)
         return _positions_from_state()
 
 
@@ -267,9 +252,9 @@ def health():
 # Launcher
 # ------------------------------------------------------------------
 
-def start_webapp(state_manager=None, port: int = 8080):
+def start_webapp(state_manager=None, client=None, port: int = 8080):
     """يشغّل Flask في خيط daemon منفصل"""
-    init_webapp(state_manager)
+    init_webapp(state_manager, client)
 
     def _run():
         try:

@@ -1844,7 +1844,7 @@ def main():
     # تشغيل خادم Mini App (Flask) على port 8080 في خيط daemon منفصل
     try:
         webapp_port = int(os.getenv("PORT", "8080"))
-        start_webapp(state_manager=state_manager, port=webapp_port)
+        start_webapp(state_manager=state_manager, client=client, port=webapp_port)
     except Exception as e:
         logger.warning(f"[WebApp] تعذر تشغيل خادم Mini App: {e}")
 
