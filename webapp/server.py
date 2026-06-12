@@ -77,30 +77,40 @@ def _get_live_positions() -> list:
         all_positions = _client.exchange.fetch_positions()
         active = []
         for pos in all_positions:
-            contracts = float(pos.get("contracts", 0) or 0)
-            if contracts == 0:
+            info = pos.get("info", {})
+            amt = float(info.get("positionAmt", pos.get("contracts", 0)) or 0)
+            
+            if amt == 0:
                 continue
 
-            entry  = float(pos.get("entryPrice",      0) or 0)
-            mark   = float(pos.get("markPrice",        0) or 0)
-            upnl   = float(pos.get("unrealizedPnl",    0) or 0)
-            lev    = float(pos.get("leverage",         1) or 1)
-            side   = "LONG" if contracts > 0 else "SHORT"
-            symbol = str(pos.get("symbol", "")).split(":")[0]
+            contracts = abs(amt)
+            entry  = float(pos.get("entryPrice") or info.get("entryPrice", 0) or 0)
+            mark   = float(pos.get("markPrice") or info.get("markPrice", 0) or 0)
+            upnl   = float(pos.get("unrealizedPnl") or info.get("unRealizedProfit", 0) or 0)
+            lev    = float(pos.get("leverage") or info.get("leverage", 1) or 1)
+            side   = "LONG" if amt > 0 else "SHORT"
+            
+            raw_symbol = str(pos.get("symbol") or info.get("symbol", ""))
+            symbol = raw_symbol.split(":")[0].replace("/", "")
+            if not symbol.endswith("USDT"):
+                symbol = symbol + "USDT"
 
-            notional = entry * abs(contracts)
+            notional = entry * contracts
             margin   = notional / lev if lev > 0 else notional
             roe_pct  = (upnl / margin * 100) if margin > 0 else 0.0
             
             # جلب SL/TP من حالة البوت إذا كانت الصفقة مفتوحة عبر البوت
             bot_meta = state_meta.get(symbol, {})
+            if not bot_meta and "/" not in symbol:
+                bot_meta = state_meta.get(f"{symbol[:-4]}/{symbol[-4:]}", {})
+
             sl = float(bot_meta.get("sl", 0) or 0)
             tp = float(bot_meta.get("tp", 0) or 0)
 
             active.append({
                 "symbol":          symbol,
                 "side":            side,
-                "contracts":       abs(contracts),
+                "contracts":       contracts,
                 "margin_used":     round(margin, 2),
                 "entry_price":     round(entry, 4),
                 "mark_price":      round(mark,  4),
