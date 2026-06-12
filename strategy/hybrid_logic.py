@@ -10,7 +10,7 @@ class HybridStrategy:
         self.veto_threshold = 0.70          # الحد الذي يمنع الصفقة تماماً
         self.risk_reduce_threshold = 0.55   # الحد الذي يقلل حجم الصفقة للنصف
 
-    def decide(self, ta_signal: str, sentiment: dict, ta_data: dict = None):
+    def decide(self, ta_signal: str, sentiment: dict, ta_data: dict = None, sentiment_mode: str = "full"):
         sentiment = self._normalize_sentiment(sentiment)
         
         label = sentiment["label"]
@@ -32,6 +32,32 @@ class HybridStrategy:
             decision["reason"] = "لم يتم تأكيد الدخول من محرك SMC. (الذكاء الاصطناعي ممنوع من بدء الصفقات)."
             return decision
 
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # وضع معطّل: يتجاهل المشاعر ويعمل بالفني فقط
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if sentiment_mode == "ta_only":
+            decision["action"] = ta_signal
+            decision["reason"] = f"[فني فقط] إشارة SMC: {ta_signal.upper()}. المشاعر معطّلة."
+            return decision
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # وضع ثانوي: المشاعر تعدّل الحجم فقط ولا تمنع الدخول
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if sentiment_mode == "weight":
+            decision["action"] = ta_signal
+            if ta_signal == "buy" and label == "negative" and score >= self.risk_reduce_threshold:
+                decision["risk_multiplier"] = 0.7
+                decision["reason"] = f"[ثانوي] شراء مسموح، خُفّض الحجم 30% بسبب مشاعر سلبية (score={score:.2f})."
+            elif ta_signal == "sell" and label == "positive" and score >= self.risk_reduce_threshold:
+                decision["risk_multiplier"] = 0.7
+                decision["reason"] = f"[ثانوي] بيع مسموح، خُفّض الحجم 30% بسبب مشاعر إيجابية (score={score:.2f})."
+            else:
+                decision["reason"] = f"[ثانوي] {ta_signal.upper()} مؤكد. المشاعر: {label} (score={score:.2f})."
+            return decision
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # وضع كامل (الافتراضي): المشاعر شرط في القرار
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 3. معالجة الشراء (LONG)
         if ta_signal == "buy":
             if label == "negative" and score >= self.veto_threshold:
@@ -69,6 +95,7 @@ class HybridStrategy:
             return decision
 
         return decision
+
 
     def _normalize_sentiment(self, sentiment):
         """تأكيد صحة كائن المشاعر ومطابقته للمعايير"""

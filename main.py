@@ -943,7 +943,8 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
         
         # ج) القرار النهائي (الاستراتيجية الهجينة)
         # نمرر coin_data ليقوم المحرك بمنع الدخول الأعمى إذا كانت المؤشرات سيئة جداً
-        decision_obj = hybrid_strategy.decide(ta_trend, sentiment, ta_data=coin_data)
+        sentiment_mode = state_manager.get("sentiment_mode", "full")
+        decision_obj = hybrid_strategy.decide(ta_trend, sentiment, ta_data=coin_data, sentiment_mode=sentiment_mode)
         final_decision = decision_obj.get("action", "hold")
         hybrid_reason = decision_obj.get("reason", "انتظار إشارة فنية")
         risk_multiplier = decision_obj.get("risk_multiplier", 1.0)

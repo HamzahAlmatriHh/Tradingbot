@@ -112,6 +112,9 @@ class TelegramNotifier:
                     {"text": "🎚️ نسبة الفلاتر والشروط", "callback_data": "gui_filter_profile"},
                 ],
                 [
+                    {"text": "🧠 وضع المشاعر (Sentiment)", "callback_data": "gui_sentiment_mode"},
+                ],
+                [
                     {"text": "⏱️ فترة المسح", "callback_data": "gui_scan_interval"},
                     {"text": "⚡ مسح الآن", "callback_data": "force_scan_now"},
                 ],
@@ -245,6 +248,37 @@ class TelegramNotifier:
                     {
                         "text": "⚡ فلاتر خفيفة وفرص أكثر",
                         "callback_data": "filterprofile_relaxed",
+                    }
+                ],
+                [
+                    {
+                        "text": "🏠 الرجوع للرئيسية",
+                        "callback_data": "gui_home",
+                    }
+                ],
+            ]
+        }
+
+    def sentiment_mode_keyboard(self):
+        """قائمة اختيار وضع تأثير المشاعر على قرار الدخول"""
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "🧠 كامل (المشاعر شرط)",
+                        "callback_data": "sentimentmode_full",
+                    }
+                ],
+                [
+                    {
+                        "text": "📉 ثانوي (يعدّل الحجم فقط)",
+                        "callback_data": "sentimentmode_weight",
+                    }
+                ],
+                [
+                    {
+                        "text": "📊 معطّل (فني فقط)",
+                        "callback_data": "sentimentmode_ta_only",
                     }
                 ],
                 [
@@ -1311,6 +1345,54 @@ class TelegramNotifier:
 
                 logger.info(f"تم تغيير وضع الفلاتر من تيليجرام إلى: {profile_name}")
                 self.answer_callback(callback_id, "تم تغيير وضع الفلاتر ✅")
+                return
+
+            elif data == "gui_sentiment_mode":
+                current_mode = state_manager.get("sentiment_mode", "full")
+                mode_labels = {
+                    "full":    "🧠 كامل — المشاعر شرط لاتخاذ القرار",
+                    "weight":  "📉 ثانوي — يعدّل حجم الصفقة فقط",
+                    "ta_only": "📊 معطّل — يعمل على المؤشرات الفنية فقط",
+                }
+                current_label = mode_labels.get(current_mode, current_mode)
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    f"🧠 <b>وضع تأثير المشاعر (Sentiment)</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"الوضع الحالي: <code>{current_label}</code>\n\n"
+                    f"<b>شرح الأوضاع:</b>\n"
+                    f"• 🧠 <b>كامل:</b> المشاعر شريك في القرار — لن يدخل صفقة إلا إذا اتفق الفني مع المشاعر. الأكثر دقة لكن الأقل نشاطاً.\n\n"
+                    f"• 📉 <b>ثانوي:</b> يدخل الصفقة بناءً على الفني، لكن إذا كانت المشاعر سلبية يقلّل حجم الصفقة تلقائياً (مثلاً 70% بدلاً من 100%). أفضل توازن.\n\n"
+                    f"• 📊 <b>معطّل:</b> يتجاهل المشاعر كلياً ويعمل على المؤشرات الفنية (RSI, EMA, MACD) فقط. الأكثر نشاطاً والأسرع في الدخول.\n\n"
+                    f"اختر الوضع المناسب:",
+                    self.sentiment_mode_keyboard(),
+                )
+                self.answer_callback(callback_id, "اختر وضع المشاعر")
+                return
+
+            elif data.startswith("sentimentmode_"):
+                new_mode = data.replace("sentimentmode_", "", 1)
+                valid_modes = {"full", "weight", "ta_only"}
+                if new_mode not in valid_modes:
+                    self.answer_callback(callback_id, "وضع غير صالح")
+                    return
+                state_manager.set("sentiment_mode", new_mode)
+                mode_descriptions = {
+                    "full":    ("🧠 كامل (المشاعر شرط)", "البوت سيشترط توافق المشاعر مع الفني قبل الدخول. دقة عالية وصفقات أقل."),
+                    "weight":  ("📉 ثانوي (يعدّل الحجم)", "البوت يدخل بناءً على الفني، لكن المشاعر السلبية تقلّل حجم الصفقة. توازن ممتاز."),
+                    "ta_only": ("📊 معطّل (فني فقط)", "البوت يتجاهل المشاعر ويعمل بالمؤشرات الفنية فقط. أكثر نشاطاً."),
+                }
+                label, desc = mode_descriptions[new_mode]
+                self.edit_message(
+                    chat_id,
+                    message_id,
+                    f"✅ <b>تم تفعيل الوضع:</b> {label}\n\n{desc}\n\n"
+                    f"سيتم تطبيق هذا الوضع من دورة المسح القادمة.",
+                    self.main_menu_keyboard(),
+                )
+                logger.info(f"تم تغيير وضع المشاعر إلى: {new_mode}")
+                self.answer_callback(callback_id, f"✅ وضع المشاعر: {label}")
                 return
 
             elif data == "gui_scan_interval":
