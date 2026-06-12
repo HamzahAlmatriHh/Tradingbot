@@ -331,13 +331,13 @@ def execute_and_protect_trade(symbol, final_decision, amount, current_price, tra
                 "tp": float(tp),
                 "entry_reason": coin_data.get('reason', f"فني:{ta_trend}"),
                 "sentiment_score": float(sentiment.get('score') or sentiment.get('galaxy_score') or 0.0) if sentiment else 0.0,
-                "adx": float(latest_bar.get('adx', 0.0)),
-                "ema_200": float(latest_bar.get('ema_200', 0.0)),
-                "atr": float(latest_bar.get('atr', 0.0)),
+                "adx": float(latest_bar.get('adx') or 0.0),
+                "ema_200": float(latest_bar.get('ema_200') or 0.0),
+                "atr": float(latest_bar.get('atr') or 0.0),
                 "spread": float((ticker.get('ask', 0) - ticker.get('bid', 0)) / ticker.get('bid', 1)) if ticker and ticker.get('bid', 0) > 0 else 0.0,
-                "volume_24h": float(ticker.get('quoteVolume', 0.0)) if ticker else 0.0,
+                "volume_24h": float(ticker.get('quoteVolume') or 0.0) if ticker else 0.0,
                 "risk_pct": float(trade_risk_pct * 100),
-                "leverage": int(trade_leverage),
+                "leverage": int(trade_leverage or 1),
                 "partial_tp_enabled": bool(partial_enabled),
                 "partial_tp_done": False,
                 "tp1": float(tp),
@@ -925,7 +925,7 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
         time.sleep(1.5)  # Rate Limiting: منع خطأ 429 من LunarCrush
         
         if sentiment:
-            logger.info(f"[LunarCrush] {coin_name}: {sentiment['label'].upper()} | Galaxy={sentiment['galaxy_score']} | Raw={sentiment['raw_sentiment_pct']}%")
+            logger.info(f"[LunarCrush] {coin_name}: {sentiment.get('label','?').upper()} | Galaxy={sentiment.get('galaxy_score','?')} | Raw={sentiment.get('raw_sentiment_pct','?')}%")
         else:
             # المرحلة 2: NewsAPI + Groq (الاحتياطي للعملات غير الموجودة في LunarCrush)
             logger.info(f"[{symbol}] لا توجد بيانات LunarCrush - جاري الاحتياط بـ NewsAPI+Groq...")
@@ -1137,7 +1137,7 @@ def run_bot_iteration(client, hybrid_strategy, risk_manager, trailing_manager, s
         else:
             coin_data['decision'] = '🟡 HOLD'
             if sentiment and sentiment.get('source') == 'lunarcrush':
-                coin_data['reason'] = f"فني:{ta_trend} | 🌙 Galaxy={sentiment.get('galaxy_score')} | Sentiment={sentiment.get('raw_sentiment_pct')}%"
+                coin_data['reason'] = f"فني:{ta_trend} | 🌙 Galaxy={sentiment.get('galaxy_score','?')} | Sentiment={sentiment.get('raw_sentiment_pct','?')}%"
             elif sentiment:
                 coin_data['reason'] = f"فني:{ta_trend} | أخبار:{sentiment.get('label','?')}"
             else:

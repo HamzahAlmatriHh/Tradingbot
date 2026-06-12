@@ -34,6 +34,7 @@ class TAEngine:
             df['ema_50'] = ta.trend.EMAIndicator(close=df['close'], window=50).ema_indicator()
             df['ema_200'] = ta.trend.EMAIndicator(close=df['close'], window=200).ema_indicator()
             df['atr'] = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
+            df['adx'] = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14).adx()
             
             # --- إعدادات مفاهيم المال الذكي (SMC) ---
             # 1. تحليل حجم الشمعة (Displacement)
