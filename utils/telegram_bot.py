@@ -736,9 +736,6 @@ class TelegramNotifier:
         initial = state_manager.get_initial_balance()
         pnl_day = wallet_balance - initial if initial else 0
 
-        tracker = PerformanceTracker(state_manager)
-        ref_wallet = tracker.get_wallet(unrealized_pnl=0.0)
-
         # 2. جلب الصفقات مباشرة من باينانس.
         try:
             all_positions = client.exchange.fetch_positions()
@@ -761,11 +758,6 @@ class TelegramNotifier:
         msg += f"💵 <b>الرصيد المتاح:</b> <code>{float(usdt_available):.2f}</code> USDT\n"
         msg += f"📈 <b>ربح/خسارة اليوم:</b> <code>{pnl_day:+.2f}</code> USDT\n"
         msg += f"🟢 <b>الصفقات المفتوحة:</b> <code>{len(live_positions)}</code>\n"
-
-        msg += "\n🧪 <b>محفظة مرجعية 50$</b>\n"
-        msg += f"• رأس البداية المرجعي: <code>{ref_wallet['starting_balance']:.2f}</code> USDT\n"
-        msg += f"• Realized مرجعي: <code>{ref_wallet['realized_pnl']:+.4f}</code> USDT\n"
-        msg += f"• رصيد مرجعي: <code>{ref_wallet['wallet_balance']:.4f}</code> USDT\n"
 
         # Trading Filter Profile Status
         msg += "\n" + format_filter_profile_status(state_manager) + "\n"
